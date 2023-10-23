@@ -8,7 +8,7 @@ from transformers.models.roformer.modeling_roformer import (
 )
 
 
-class RetrieverMLP(nn.Module):
+class Retriever(nn.Module):
     def __init__(self, pred_dim):
         super().__init__()
         pred_dim = pred_dim + 1  # To handle time
@@ -56,7 +56,7 @@ class ReprTimeEnc(nn.Module):
         return x, src_pad_mask
 
 
-class TransformerPredictor(nn.Module):
+class Predictor(nn.Module):
     def __init__(
         self, pred_dim, dropout, pred_time, n_layers, n_heads, max_retrieve_len
     ):
@@ -115,24 +115,24 @@ class REMed(nn.Module):
         self.pred_dim = pred_dim
         self.max_retrieve_len = max_retrieve_len
 
-        self.pred_model = TransformerPredictor(
+        self.predictor = Predictor(
             pred_dim, dropout, pred_time, n_layers, n_heads, max_retrieve_len
         )
         self.emb2out_model = PredOutPutLayer(pred_dim)
-        self.retriever_mlp = RetrieverMLP(pred_dim)
+        self.retriever = Retriever(pred_dim)
 
         self.register_buffer("random_token_emb", torch.randn(pred_dim))
 
-        self.set_mode("mlp")
+        self.set_mode("retriever")
 
     def set_mode(self, mode):
         self.mode = mode
-        if mode == "mlp":
+        if mode == "retriever":
             self.requires_grad_(False)
-            self.retriever_mlp.requires_grad_(True)
+            self.retriever.requires_grad_(True)
         elif mode == "predictor":
             self.requires_grad_(True)
-            self.retriever_mlp.requires_grad_(False)
+            self.retriever.requires_grad_(False)
 
     # Reprs: Batch of list of event vectors (B, L, E)
     # Times: Batch of list of event times (B, L) (unit=Minute)
@@ -142,7 +142,7 @@ class REMed(nn.Module):
         times = nn.functional.pad(times, (0, self.max_retrieve_len))
         # To implement right-side padding
         times = torch.where(reprs.eq(0).all(dim=-1), 1e10, times)
-        sim = self.retriever_mlp(reprs, times)
+        sim = self.retriever(reprs, times)
 
         _sim = torch.where(
             reprs.eq(0).all(dim=-1),
@@ -162,7 +162,7 @@ class REMed(nn.Module):
         topk = topk.gather(1, topk_indices.unsqueeze(-1).repeat(1, 1, E))
         topk_values = topk_values.gather(1, topk_indices)
 
-        def _retriever_mlp_path():
+        def _retriever_path():
             _topk_values = topk_values.reshape(B * K, 1)
             _topk = topk.reshape(B * K, 1, -1)
             _topk_times = topk_times.reshape(B * K, 1)
@@ -192,7 +192,7 @@ class REMed(nn.Module):
                 / _topk_values.reshape(B, K).sum(dim=1, keepdim=True)
             ).reshape(B * K)
 
-            res = self.pred_model(_topk, times=_topk_times, **kwargs)
+            res = self.predictor(_topk, times=_topk_times, **kwargs)
             pred = self.emb2out_model(res, **kwargs)
 
             pred = torch.sum(
@@ -208,19 +208,19 @@ class REMed(nn.Module):
                 self.random_token_emb.expand(B, E),
                 topk[:, 0, :],
             )  # To prevent NaN
-            res = self.pred_model(topk, times=topk_times, **kwargs)
+            res = self.predictor(topk, times=topk_times, **kwargs)
             pred = self.emb2out_model(res, **kwargs)
 
             return pred
 
         # If training, iterate two paths
         if self.training:
-            if self.mode == "mlp":
-                pred = _retriever_mlp_path()
+            if self.mode == "retriever":
+                pred = _retriever_path()
                 self.set_mode("predictor")
             else:
                 pred = _predictor_path()
-                self.set_mode("mlp")
+                self.set_mode("retriever")
         # If evaluating, use only predictor path
         else:
             pred = _predictor_path()
