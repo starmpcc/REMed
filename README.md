@@ -101,7 +101,7 @@ accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {
 <summary>Train REMed</summary>
 
 - Note that the `{EXPERIMENT_NAME}` refers to the name of the pre-training experiment.
-- If you want to run a experiment with infinite observation window, set time=-99999
+- If you want to run an experiment with infinite observation window, set time=-99999
 - Otherwise, the time should be {PRED_TIME} - {OBS_SIZE} (e.g. pred time 48h, obs 12h -> time 36)
 ```bash
 accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {GPU_ID} main.py --src {SRC_DATA} --input {DATA_PATH} --save_dir {SAVE_PATH} --train_type remed --time {TIME} --pred_time {PRED_TIME} --wandb_project_name {PROJECT_NAME} --wandb_entity_name {ENTITY_NAME} --lr 5e-5 --scorer --scorer_use_time --pretrained {EXPERIMENT_NAME}
