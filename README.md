@@ -1,6 +1,5 @@
 # REMed: Retrieval-Enhanced Medical Prediction Model
-Official implementation for Multi-purpose Retrieval-Enhanced Medical Prediction Model using Near-Infinite History
-- NOTE: Full paper would be available soon.
+Official implementation for [General-purpose Retrieval-Enhanced Medical Prediction Model using Near-Infinite History](https://arxiv.org/abs/2310.20204v1)
 
 > Developing medical prediction models based on EHRs typically relies on expert opinion for feature selection and adjusting the observation window size.
 To address these issues, we propose **R**etrieval-**E**nhanced **Med**ical prediction model (**REMed**), which can essentially evaluate an unlimited number of medical events, retrieve the relevant ones, and make predictions.
@@ -108,3 +107,15 @@ accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {
 ```
 
 </details>
+
+## Citation
+```
+@misc{kim2023generalpurpose,
+      title={General-Purpose Retrieval-Enhanced Medical Prediction Model Using Near-Infinite History}, 
+      author={Junu Kim and Chaeeun Shim and Bosco Seong Kyu Yang and Chami Im and Sung Yoon Lim and Han-Gil Jeong and Edward Choi},
+      year={2023},
+      eprint={2310.20204},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
