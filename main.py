@@ -32,7 +32,7 @@ def get_parser():
         "--train_type", type=str, default="short", choices=TRAINER_REGISTRY.keys()
     )
     parser.add_argument(
-        "--src_data", type=str, choices=["eicu", "mimiciv"], default="mimiciv"
+        "--src_data", type=str, choices=["eicu", "mimiciv", "umcdb", "hirid"], default="mimiciv"
     )
     parser.add_argument(
         "--pred_targets",

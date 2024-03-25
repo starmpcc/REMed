@@ -22,11 +22,14 @@ class Task:
     property: str
 
 
-def get_task(task_name):
+def get_task(task_name, src_data):
     if re.findall("mortality|readmission|los", task_name):
         return Task(task_name, 1, "binary")
     elif re.findall("diagnosis", task_name):
-        return Task(task_name, 17, "multilabel")
+        if src_data == "umcdb":
+            return Task(task_name, 13, "multilabel")
+        else:
+            return Task(task_name, 17, "multilabel")
     elif re.findall("creatinine|platelets", task_name):
         return Task(task_name, 5, "multiclass")
     elif re.findall("wbc|bicarbonate|sodium", task_name):

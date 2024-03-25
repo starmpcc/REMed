@@ -26,6 +26,8 @@ class BaseDataset(Dataset):
         self.stay_id_key = {
             "mimiciv": "stay_id",
             "eicu": "patientunitstayid",
+            "umcdb": "admissionid",
+            "hirid": "patientid",
         }[args.src_data]
         self.df = df
         self.keys = (

@@ -20,7 +20,7 @@ logger = get_logger(__name__, "INFO")
 
 class Trainer:
     def __init__(self, args):
-        args.tasks = [get_task(target) for target in args.pred_targets]
+        args.tasks = [get_task(target, args.src_data) for target in args.pred_targets]
         self.args = args
         set_seed(self.args.seed)
         self.df = pd.read_csv(

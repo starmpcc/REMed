@@ -6,6 +6,10 @@ To address these issues, we propose **R**etrieval-**E**nhanced **Med**ical predi
 
 ![model_architecture](resources/model.jpg)
 
+## Update
+- 2024.03.25: REMed now support [UMCdb](https://amsterdammedicaldatascience.nl/amsterdamumcdb/) and [HIRID](https://hirid.intensivecare.ai/)!
+
+
 ## Standalone REMed
 - For enhanced accessibility, we offer a simplified, standalone REMed model available in `standalone_remed.py`.
 - This model takes a list of event vectors and their corresponding timestamps as input, and performs a binary classification.
@@ -47,7 +51,7 @@ pip install numpy pandas tqdm treelib transformers pyspark
 export PATH=/usr/local/cuda/bin:$PATH
 conda install pytorch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia
 conda install numpy pandas einops h5pickle tqdm scikit-learn -y
-pip install performer_pytorch recurrent_memory_transformer_pytorch==0.2.2 transformers==4.30.1 accelerate 
+pip install performer_pytorch recurrent_memory_transformer_pytorch==0.2.2 transformers==4.30.1 accelerate==0.20.3 
 cd src/models/kernel/
 python setup.py install
 ```
