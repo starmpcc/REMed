@@ -1,5 +1,5 @@
 # REMed: Retrieval-Enhanced Medical Prediction Model
-Official implementation for [General-purpose Retrieval-Enhanced Medical Prediction Model using Near-Infinite History](https://arxiv.org/abs/2310.20204v1)
+Official implementation for [General-purpose Retrieval-Enhanced Medical Prediction Model using Near-Infinite History](https://arxiv.org/abs/2310.20204)
 
 > Developing medical prediction models based on EHRs typically relies on expert opinion for feature selection and adjusting the observation window size.
 To address these issues, we propose **R**etrieval-**E**nhanced **Med**ical prediction model (**REMed**), which can essentially evaluate an unlimited number of medical events, retrieve the relevant ones, and make predictions.
@@ -7,6 +7,7 @@ To address these issues, we propose **R**etrieval-**E**nhanced **Med**ical predi
 ![model_architecture](resources/model.jpg)
 
 ## Update
+- 2024.07.05: Our paper is accepted on Machine Learning for Healthcare Conference (MLHC) 2024!
 - 2024.03.25: REMed now support [UMCdb](https://amsterdammedicaldatascience.nl/amsterdamumcdb/) and [HIRID](https://hirid.intensivecare.ai/)!
 
 
