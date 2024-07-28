@@ -7,7 +7,7 @@ To address these issues, we propose **R**etrieval-**E**nhanced **Med**ical predi
 ![model_architecture](resources/model.jpg)
 
 ## Update
-- 2024.07.05: Our paper is accepted on Machine Learning for Healthcare Conference (MLHC) 2024!
+- 2024.07.05: Our paper has been accepted on Machine Learning for Healthcare Conference (MLHC) 2024!
 - 2024.03.25: REMed now support [UMCdb](https://amsterdammedicaldatascience.nl/amsterdamumcdb/) and [HIRID](https://hirid.intensivecare.ai/)!
 
 
