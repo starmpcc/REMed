@@ -32,8 +32,33 @@ def get_parser():
         "--train_type", type=str, default="short", choices=TRAINER_REGISTRY.keys()
     )
     parser.add_argument(
-        "--src_data", type=str, choices=["eicu", "mimiciv", "umcdb", "hirid"], default="mimiciv"
+        "--src_data",
+        type=str,
+        choices=["eicu", "mimiciv", "umcdb", "hirid", "meds"],
+        default="mimiciv"
     )
+    parser.add_argument(
+        "--train_subset",
+        type=str,
+        default="train",
+        help="file name without extension to load data for the training. only used when"
+            "`--src_data` is set to `'meds'`."
+    )
+    parser.add_argument(
+        "--valid_subset",
+        type=str,
+        default="tuning",
+        help="file name without extension to load data for the validation. only used when"
+            "`--src_data` is set to `'meds'`."
+    )
+    parser.add_argument(
+        "--test_subset",
+        type=str,
+        default="held_out",
+        help="file name without extension to load data for the test. only used when `--src_data` "
+            "is set to `'meds'`."
+    )
+
     parser.add_argument(
         "--pred_targets",
         nargs="+",
@@ -65,6 +90,7 @@ def get_parser():
             "sodium_1",
             "sodium_2",
             "sodium_3",
+            "meds_single_task"
         ],
         default=[
             "readmission",

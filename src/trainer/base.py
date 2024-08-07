@@ -4,6 +4,7 @@ import uuid
 from contextlib import nullcontext
 from shutil import rmtree
 
+import h5py
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -12,7 +13,7 @@ from h5pickle import File
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..dataset import EHRforReprGen
+from ..dataset import EHRforReprGen, MEDSForReprGen
 from ..utils.trainer_utils import *
 
 logger = get_logger(__name__, "INFO")
@@ -23,11 +24,20 @@ class Trainer:
         args.tasks = [get_task(target, args.src_data) for target in args.pred_targets]
         self.args = args
         set_seed(self.args.seed)
-        self.df = pd.read_csv(
-            os.path.join(
-                args.input_path, f"{args.pred_time}h", f"{args.src_data}_cohort.csv"
-            ),
-        )
+        if self.args.src_data == "meds":
+            self.df = None # do not need this for meds dataset
+            self.train_subset = args.train_subset
+            self.valid_subset = args.valid_subset
+            self.test_dataset = args.test_subset
+        else:
+            self.df = pd.read_csv(
+                os.path.join(
+                    args.input_path, f"{args.pred_time}h", f"{args.src_data}_cohort.csv"
+                ),
+            )
+            self.train_subset = "train"
+            self.valid_subset = "valid"
+            self.test_subset = "test"
 
     def run(self):
         logging_method = None if self.args.debug else "wandb"
@@ -70,7 +80,10 @@ class Trainer:
         )
         logger.info(f"exp_name: {self.args.exp_name}", main_process_only=True)
 
-        self.data = File(self.data_path, "r")
+        if self.args.src_data == "meds":
+            self.data = self.data_path # meds dataset needs data path, not data itself
+        else:
+            self.data = File(self.data_path, "r")
 
         if (not self.args.test_only) and (not self.args.encode_only):
             self.train()
@@ -80,7 +93,10 @@ class Trainer:
             self.test()
 
         if self.args.encode_events or self.args.encode_only:
-            self.encode_events()
+            if self.src_data == "meds":
+                self.encode_events_meds()
+            else:
+                self.encode_events()
         self.finish()
 
     def finish(self):
@@ -101,8 +117,8 @@ class Trainer:
             metric=self.metric.update_target,
         )
         self.n_epoch = N_Epoch()
-        train_loader = self.dataloader_set("train")
-        valid_loader = self.dataloader_set("valid")
+        train_loader = self.dataloader_set(self.train_subset)
+        valid_loader = self.dataloader_set(self.valid_subset)
 
         model = self.architecture(self.args)
         if self.args.pretrained and not self.args.no_pretrained_checkpoint:
@@ -167,7 +183,7 @@ class Trainer:
             self.accelerator.wait_for_everyone()
 
     def evaluation(self, n_epoch):
-        metric_dict = self.epoch("valid", self.valid_loader, n_epoch)
+        metric_dict = self.epoch(self.valid_subset, self.valid_loader, n_epoch)
         best_model_path = os.path.join(
             self.args.save_dir,
             self.args.exp_name,
@@ -181,7 +197,7 @@ class Trainer:
 
     def test(self):
         logger.info("Start Testing", main_process_only=True)
-        test_loader = self.dataloader_set("test")
+        test_loader = self.dataloader_set(self.test_subset)
         best_model_path = os.path.join(
             self.args.save_dir,
             self.args.resume_name if self.args.test_only else self.args.exp_name,
@@ -201,7 +217,7 @@ class Trainer:
         model = self.architecture(self.args)
         model = load_model(best_model_path, model)
         self.model, self.test_loader = self.accelerator.prepare(model, test_loader)
-        metric_dict = self.epoch("test", self.test_loader)
+        metric_dict = self.epoch(self.test_subset, self.test_loader)
 
         return metric_dict
 
@@ -218,7 +234,7 @@ class Trainer:
         )
 
     def epoch(self, split, data_loader, n_epoch=0):
-        if split == "train":
+        if split == self.train_subset:
             self.model.train()
             context = nullcontext()
             accelerator = None
@@ -234,7 +250,7 @@ class Trainer:
             for sample in t:
                 output, reprs = self.model(**sample)
                 loss, logging_outputs = self.criterion(output, reprs)
-                if split == "train":
+                if split == self.train_subset:
                     self.optimizer.zero_grad(set_to_none=True)
                     self.accelerator.backward(loss)
                     self.optimizer.step()
@@ -375,3 +391,134 @@ class Trainer:
                     os.remove(_get_hdf5_path(i))
         self.accelerator.wait_for_everyone()
         return
+
+    # to add compatibility with meds dataset
+    def encode_events_meds(self):
+        best_model_path = os.path.join(
+            self.args.save_dir,
+            self.args.exp_name,
+            "checkpoint_best.pt",
+        )
+        if self.args.train_type != "bioclinicalbert_encode":
+            model = self.architecture(self.args)
+            model = load_model(best_model_path, model)
+            self.model = self.accelerator.prepare(model)
+            self.args.max_seq_len = 1024
+            self.args.batch_size = 8
+        else:
+            self.args.max_seq_len = 512
+            self.args.batch_size = 8
+        self.model.eval()
+
+        self.dataset = MEDSForReprGen
+
+        for split in [self.train_subset, self.valid_subset, self.test_subset]:
+            if split is None:
+                continue
+            logger.info(f"Start Encoding for {split} split")
+
+            dataloader = self.dataloader_set(split)
+            dataloader = self.accelerator.prepare(dataloader)
+
+            def _get_hdf5_path(i):
+                postfix = "" if i == -1 else "_" + str(i)
+                return os.path.join(
+                    self.args.save_dir,
+                    self.args.exp_name,
+                    f"{split}_encoded{postfix}.h5",
+                )
+
+            hdf5_path = _get_hdf5_path(self.accelerator.local_process_index)
+            logger.info("Writing metadata to HDF5")
+
+            with open(File(hdf5_path, "w")) as f:
+                f.create_group("ehr")
+                encoded = f["ehr"]
+
+                data = h5py.File(os.path.join(self.data, split + ".h5"))["ehr"]
+                patient_ids = data.keys()
+
+                for k in patient_ids:
+                    k = str(k)
+                    stay_g = encoded.create_group(k)
+                    stay_g.create_dataset(
+                        "encoded",
+                        shape=(len(data[k]["time"]), self.args.pred_dim),
+                        dtype="i2",
+                        compression="lzf",
+                        shuffle=True,
+                        chunks=(len(data[k]["time"]), self.args.pred_dim),
+                    )
+                self.accelerator.wait_for_everyone()
+
+                with torch.no_grad():
+                    loader = enumerate(dataloader)
+                    if self.accelerator.is_main_process:
+                        loader = tqdm(loader)
+                    for i, batch in loader:
+                        self.step = i
+                        all_codes_embs = self.model.input2emb_model(**batch)
+
+                        reprs = self.model.eventencoder_model(
+                            all_codes_embs, **batch
+                        )  # B, S, E
+                        reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
+                        patient_ids = batch["patient_id"].cpu().numpy().reshape(-1)
+                        indices = batch["index"].cpu().numpy().reshape(-1)
+                        for repr, patient_id, index in zip(reprs, patient_ids, indices):
+                            patient_id, index = int(patient_id), int(index)
+                            start = self.args.max_seq_len * index
+                            end = start + self.args.max_seq_len
+                            max_len = encoded[str(patient_id)]["encoded"].shape[0]
+                            if end > max_len:
+                                repr = repr[: max_len - start, :]
+                                end = max_len
+                            encoded[str(patient_id)]["encoded"][start:end, :] = repr
+
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.num_processes == 1:
+                os.rename(hdf5_path, _get_hdf5_path(-1))
+                main_file = File(_get_hdf5_path(-1), "r+")
+                for k in tqdm(data.keys()):
+                    main_file["ehr"][k].create_dataset(
+                        "time", data=data[k]["time"][()]
+                    )
+                    main_file["ehr"][k].attrs.update(data[k].attrs)
+                main_file.close()
+            else:
+                if self.accelerator.is_main_process:
+                    main_file = File(_get_hdf5_path(-1), "w")
+                    main_file.create_group("ehr")
+                    files = [
+                        File(_get_hdf5_path(i), "r")
+                        for i in range(self.accelerator.num_processes)
+                    ]
+                    for k in tqdm(data.keys()):
+                        # Chunkwise sum, but may be duplicated chunks
+                        encodeds = (
+                            np.stack([f["ehr"][k]["encoded"][()] for f in files], axis=0)
+                            .astype(np.uint16)
+                            .max(axis=0)
+                            .astype(np.int16)
+                        )
+                        main_file["ehr"].create_group(k)
+                        main_file["ehr"][k].create_dataset(
+                            "encoded",
+                            data=encodeds,
+                            dtype="i2",
+                            compression="lzf",
+                            shuffle=True,
+                            chunks=encodeds.shape,
+                        )
+                        main_file["ehr"][k].create_dataset(
+                            "time", data=data[k]["time"][()]
+                        )
+                        main_file["ehr"][k].attrs.update(data[k].attrs)
+
+                    for f in files:
+                        f.close()
+                    main_file.close()
+                    for i in range(self.accelerator.num_processes):
+                        os.remove(_get_hdf5_path(i))
+            self.accelerator.wait_for_everyone()
+            return

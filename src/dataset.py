@@ -1,5 +1,7 @@
+import os
 import math
 import random
+import h5py
 
 import numpy as np
 import pandas as pd
@@ -145,7 +147,6 @@ class EHRDataset(BaseDataset):
             "label": labels,
         }
 
-
 class EHRforReprGen(BaseDataset):
     # To make Event Reprs (see `encode_events.py`)
     def __init__(self, args, split=None, data=None, df=None):
@@ -181,6 +182,102 @@ class EHRforReprGen(BaseDataset):
             "index": torch.IntTensor([sample_idx]),
         }
 
+class MEDSDataset(Dataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__()
+
+        self.args = args
+
+        self.data = h5py.File(os.path.join(data_path, split + ".h5"))["ehr"]
+        self.keys = list(self.data.keys())
+
+    def __len__(self):
+        return len(self.data)
+
+    def collate_fn(self, samples):
+        ret = dict()
+        max_sample_len = max([s["times"].shape[0] for s in samples])
+        padding_to = min(
+            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
+        )
+
+        for k, v in samples[0].items():
+            if k == "times":
+                padded = pad_sequence([s["times"] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, padding_to - padded.shape[1]))
+            elif k == "label":
+                ret[k]["meds_single_task"] = torch.FloatTensor(
+                    torch.stack(s["label"] for s in samples)
+                )
+            elif k in ["patient_id", "index"]: # for MEDSForReprGen
+                ret[k] = torch.stack([s[k] for s in samples])
+            else:
+                padded = pad_sequence([s[k] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
+
+    def __getitem__(self, idx):
+        data = self.data[self.keys[idx]]
+        input = data["hi"][:]
+        times = data["time"][:]
+        label = data["label"][()] # assume it is a scalar value for a binary classification task
+
+        if self.args.random_sample:
+            if self.args.max_seq_len < input.shape[0]:
+                indices = random.sample(
+                    range(0, input.shape[0]), self.args.max_seq_len
+                )
+                input = input[indices, :, :]
+                times = times[indices]
+
+        return {
+            "input_ids": torch.LongTensor(input[:, 0, :][-self.args.max_seq_len:]),
+            "type_ids": torch.LongTensor(input[:, 1, :][-self.args.max_seq_len:]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :][-self.args.max_seq_len:]),
+            "times": torch.IntTensor(times[-self.args.max_seq_len:]),
+            "label": label
+        }
+
+class MEDSForReprGen(MEDSDataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__(args, split, data_path, *pargs, **kwargs)
+
+        num_samples_per_patient = pd.read_csv(
+            os.path.join(data_path, split + ".tsv"), delimiter="\t"
+        ).set_index("patient_id")
+        num_samples_per_patient["num_samples"] = num_samples_per_patient["num_events"].map(
+            lambda x: math.ceil(x / args.max_seq_len)
+        )
+        num_samples_per_patient["last_sample_index"] = np.cumsum(num_samples_per_patient["num_samples"])
+
+        self.num_samples_per_patient = num_samples_per_patient
+
+    def __len__(self):
+        return self.num_samples_per_patient["last_sample_index"].max()
+
+    def __getitem__(self, idx):
+        patient_index = (
+            self.num_samples_per_patient["last_sample_index"].searchsorted(idx, side="right")
+        )
+        patient_id = self.num_samples_per_patient.index[patient_index]
+        prev_idx = (
+            0 if patient_index == 0 else (
+                self.num_samples_per_patient["last_sample_index"].iloc[patient_index - 1]
+            )
+        )
+        data = self.data[str(patient_id)]
+        
+        input = data["hi"]
+        sample_idx_in_patient = idx - prev_idx
+        start = self.args.max_seq_len * sample_idx_in_patient
+        end = self.args.max_seq_len * (sample_idx_in_patient + 1)
+        return {
+            "input_ids": torch.LongTensor(input[:, 0, :][start:end]),
+            "type_ids": torch.LongTensor(input[:, 1, :][start:end]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :][start:end]),
+            "times": torch.IntTensor(data["time"][start:end]),
+            "patient_id": torch.IntTensor([patient_id]),
+            "index": torch.IntTensor([sample_idx_in_patient])
+        }
 
 class ReprDataset(BaseDataset):
     def __init__(self, args, split, data, df):
