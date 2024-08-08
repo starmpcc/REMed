@@ -187,7 +187,8 @@ def get_parser():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log_loss", action="store_true")
     # Wandb
-    parser.add_argument("--wandb_entity_name", type=str, required=True)
+    parser.add_argument("--wandb", action="store_true", help="whether to log using wandb")
+    parser.add_argument("--wandb_entity_name", type=str)
     parser.add_argument("--wandb_project_name", type=str, default="REMed")
     parser.add_argument("--pretrained", type=str, default=None)
     parser.add_argument("--resume_name", type=str, default=None)

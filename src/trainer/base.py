@@ -40,7 +40,7 @@ class Trainer:
             self.test_subset = "test"
 
     def run(self):
-        logging_method = None if self.args.debug else "wandb"
+        logging_method = None if self.args.debug or not self.args.wandb else "wandb"
         self.accelerator = Accelerator(
             log_with=logging_method, split_batches=True, mixed_precision="bf16"
         )
@@ -53,7 +53,7 @@ class Trainer:
             self.args.exp_name = f"{uuid.uuid4().hex}_{self.args.seed}"
 
         config = self.args if not self.args.encode_only else None
-        if not self.args.debug:
+        if logging_method == "wandb":
             wandb_init_kwargs = {
                 "wandb": {
                     "entity": self.args.wandb_entity_name,
