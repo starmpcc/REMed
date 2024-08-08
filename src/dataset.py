@@ -1,7 +1,7 @@
 import os
 import math
 import random
-import h5py
+import h5pickle
 
 import numpy as np
 import pandas as pd
@@ -188,7 +188,7 @@ class MEDSDataset(Dataset):
 
         self.args = args
 
-        self.data = h5py.File(os.path.join(data_path, split + ".h5"))["ehr"]
+        self.data = h5pickle.File(os.path.join(data_path, split + ".h5"))["ehr"]
         self.keys = list(self.data.keys())
 
     def __len__(self):
@@ -206,8 +206,9 @@ class MEDSDataset(Dataset):
                 padded = pad_sequence([s["times"] for s in samples], batch_first=True)
                 ret[k] = pad(padded, (0, padding_to - padded.shape[1]))
             elif k == "label":
+                ret[k] = {}
                 ret[k]["meds_single_task"] = torch.FloatTensor(
-                    torch.stack(s["label"] for s in samples)
+                    torch.stack([s["label"] for s in samples])
                 )
             elif k in ["patient_id", "index"]: # for MEDSForReprGen
                 ret[k] = torch.stack([s[k] for s in samples])
@@ -215,11 +216,14 @@ class MEDSDataset(Dataset):
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
                 ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
 
+        return ret
+
     def __getitem__(self, idx):
         data = self.data[self.keys[idx]]
         input = data["hi"][:]
         times = data["time"][:]
-        label = data["label"][()] # assume it is a scalar value for a binary classification task
+        # assume it is a scalar value for a binary classification task
+        label = torch.tensor([data["label"][()]]).float()
 
         if self.args.random_sample:
             if self.args.max_seq_len < input.shape[0]:
@@ -287,10 +291,13 @@ class ReprDataset(BaseDataset):
         data = self.data[self.keys[idx]]
         encoded = data["encoded"][:]
         times = data["time"][:]
-        hi_start = np.searchsorted(times, self.args.time * 60)
-        if hi_start == encoded.shape[0]:
-            # If no event untile the time, return the last event (to prevent nan)
-            hi_start -= 1
+        if self.args.src_data == "meds":
+            hi_start = 0
+        else:
+            hi_start = np.searchsorted(times, self.args.time * 60)
+            if hi_start == encoded.shape[0]:
+                # If no event untile the time, return the last event (to prevent nan)
+                hi_start -= 1
 
         encoded = torch.from_numpy(encoded[hi_start:]).view(torch.bfloat16).float()
         times = times[hi_start:]
