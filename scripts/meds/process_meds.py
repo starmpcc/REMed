@@ -7,12 +7,13 @@ from pathlib import Path
 from argparse import ArgumentParser
 
 import h5py
+import pandas as pd
 import polars as pl
 import numpy as np
 from bisect import bisect_left, bisect_right
 
-from tqdm import tqdm
 import multiprocessing
+from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
 from transformers import AutoTokenizer
@@ -36,6 +37,11 @@ def get_parser():
             "*.parquet files contained in the directory, including sub-directories, to process "
             "all of them."
     )
+    parser.add_argument(
+        "--metadata_dir",
+        help="path to metadata directory for the input MEDS dataset, which contains codes.parquet"
+    )
+
     parser.add_argument(
         "--cohort",
         type=str,
@@ -61,14 +67,24 @@ def get_parser():
         metavar="N",
         default=1,
         type=int,
-        help="number of parallel workers"
+        help="number of parallel workers."
     )
-    
+
+    # NOTE this will be omitted in the future when the related issue is solved
+    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
+    parser.add_argument(
+        "--mimic_dir",
+        help="path to directory for MIMIC-IV database where it contains hosp/ and icu/ as a"
+            "subdirectory."
+    )
+
     return parser
 
 def main(args):
     root_path = Path(args.root)
     output_dir = Path(args.output_dir)
+    metadata_dir = Path(args.metadata_dir)
+    mimic_dir = Path(args.mimic_dir)
 
     if not output_dir.exists():
         output_dir.mkdir()
@@ -95,6 +111,18 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
 
+    codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
+    codes_metadata = codes_metadata.set_index("code")["description"].to_dict()
+
+    # NOTE this will be omitted in the future when the related issue is solved
+    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
+    d_items = pd.read_csv(mimic_dir / "icu" / "d_items.csv.gz")
+    d_items["itemid"] = d_items["itemid"].astype("str")
+    d_items = d_items.set_index("itemid")["label"].to_dict()
+    d_labitems = pd.read_csv(mimic_dir / "hosp" / "d_labitems.csv.gz")
+    d_labitems["itemid"] = d_labitems["itemid"].astype("str")
+    d_labitems = d_labitems.set_index("itemid")["label"].to_dict()
+
     progress_bar = tqdm(data_paths, total=len(data_paths))
     for data_path in progress_bar:
         progress_bar.set_description(str(data_path))
@@ -117,7 +145,6 @@ def main(args):
                 cohort = pl.scan_csv(cohort_path)
             case ".parquet":
                 cohort = pl.scan_parquet(cohort_path)
-                cohort = cohort.rename({"subject_id": "patient_id"}) #XXX
             case _:
                 raise ValueError(f"Unsupported file format: {cohort_path.suffix}")
 
@@ -199,16 +226,25 @@ def main(args):
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
 
             meds_to_remed_partial = functools.partial(
-                meds_to_remed, tokenizer, rest_of_columns, column_name_idcs
+                meds_to_remed, tokenizer, rest_of_columns, column_name_idcs, codes_metadata,
+                # NOTE this will be omitted in the future when the related issue is solved
+                # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
+                d_items,
+                d_labitems
             )
 
-            # TODO tqdm 빼고 돌려서 시간 확인 -- tqdm 있을 때는 한 step당 (/60) 1분 5~10초 정도 걸림
             # meds --> remed
-            remeds = process_map(
-                meds_to_remed_partial,
-                data.iter_rows(),
-                max_workers=args.workers,
-            )
+            if args.workers <= 1:
+                remeds = []
+                for cohort_sample in tqdm(data.iter_rows(), total=len(data)):
+                    cohort_result = meds_to_remed_partial(cohort_sample)
+                    remeds.append(cohort_result)
+            else:
+                remeds = process_map(
+                    meds_to_remed_partial,
+                    data.iter_rows(),
+                    max_workers=args.workers,
+                )
 
             for r in tqdm(remeds, total=len(remeds)):
                 sample_result = result.create_group(r[0]) # cohort_id: {patient_id}_{cohort_number}
@@ -220,7 +256,19 @@ def main(args):
 
                 manifest_f.write(f"{r[0]}\t{len(r[1])}\n")
 
-def meds_to_remed(tokenizer, rest_of_columns, column_name_idcs, cohort_sample):
+def meds_to_remed(
+    tokenizer,
+    rest_of_columns,
+    column_name_idcs,
+    codes_metadata,
+    # NOTE this will be omitted in the future when the related issue is solved
+    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
+    d_items,
+    d_labitems,
+    cohort_sample
+):
+    code_matching_pattern = re.compile(r"\d+")
+
     events = []
     times = []
     digit_offsets = []
@@ -235,7 +283,45 @@ def meds_to_remed(tokenizer, rest_of_columns, column_name_idcs, cohort_sample):
 
                 if col_event is not None:
                     col_event = str(col_event)
-                    if col_name != "code" and not "id" in col_name:
+                    if col_name == "code":
+                        # NOTE temporal hack for addressing missing descriptions for MIMIC-IV from
+                        # MEDS-Transform v0.0.3 (https://github.com/mmcdermott/MEDS_transforms/issues/148),
+                        # will be omitted in the future when it is solved
+                        event_type = col_event.split("//")[0]
+                        if event_type in [
+                            "LAB", "PROCEDURE", "PATIENT_FLUID_OUTPUT", "INFUSION_START",
+                            "INFUSION_END", "DIAGNOSIS"
+                        ]:
+                            items = col_event.split("//")
+                            # for icd codes
+                            if "ICD" in items:
+                                desc = codes_metadata[col_event]
+                                col_event = event_type + "//" + desc
+                            # for item codes
+                            else:
+                                code_idx = [
+                                    bool(code_matching_pattern.fullmatch(item)) for item in items
+                                ].index(True)
+                                code = items[code_idx]
+
+                                do_break = False
+                                if (
+                                    col_event in codes_metadata
+                                    and codes_metadata[col_event] is not None
+                                    and codes_metadata[col_event] != ""
+                                ):
+                                    desc = codes_metadata[col_event]
+                                elif code in d_items:
+                                    desc = d_items[code]
+                                elif code in d_labitems:
+                                    desc = d_labitems[code]
+                                else:
+                                    do_break = True
+                                
+                                if not do_break:
+                                    items[code_idx] = desc
+                                    col_event = "//".join(items)
+                    elif not "id" in col_name:
                         col_event = re.sub(
                             r"\d*\.\d+", lambda x: str(round(float(x.group(0)), 4)),
                             col_event
@@ -335,6 +421,9 @@ def meds_to_remed(tokenizer, rest_of_columns, column_name_idcs, cohort_sample):
     times = np.array([0] + times)
 
     label = cohort_sample[column_name_idcs["cohort_label"]]
+    # NOTE temporary hack to binarize the label
+    if label > 1:
+        label = 1
     patient_id = cohort_sample[column_name_idcs["patient_id"]]
 
     return (patient_id, sample_data, times, label, )

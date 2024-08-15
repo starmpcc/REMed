@@ -37,7 +37,12 @@ model(reprs, times) # Return probability between [0,1] (B, 1)
 ```
 
 
-## Reproducing  Guide
+## Reproducing Guide
+
+> [!NOTE]
+> This reproducing guide contains instructions for processing MIMIC-IV and eICU to reproduce the
+> results reported in the original paper. If you want to process MEDS-formatted dataset, please
+> follow instructions for MEDS in the below section.
 
 <details>
 <summary>Requirements</summary>
@@ -62,7 +67,7 @@ python setup.py install
 <details>
 <summary> Data Preprocessing </summary>
 
-- We use [Integrated-EHR-Pipeline](https://github.com/Jwoo5/integrated-ehr-pipeline)
+- We use [Integrated-EHR-Pipeline](https://github.com/Jwoo5/integrated-ehr-pipeline) for MIMIC-IV and eICU database. 
 - NOTE: This process requires high RAM. If you meet out-of-memory, please lower the `--num_threads`
 
 ```bash
@@ -108,8 +113,202 @@ accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {
 - If you want to run an experiment with infinite observation window, set time=-99999
 - Otherwise, the time should be {PRED_TIME} - {OBS_SIZE} (e.g. pred time 48h, obs 12h -> time 36)
 ```bash
-accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {GPU_ID} main.py --src {SRC_DATA} --input {DATA_PATH} --save_dir {SAVE_PATH} --train_type remed --time {TIME} --pred_time {PRED_TIME} --wandb_project_name {PROJECT_NAME} --wandb_entity_name {ENTITY_NAME} --lr 1e-5 --scorer --scorer_use_time --pretrained {EXPERIMENT_NAME} --no_pretrained_checkpoint
+accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {GPU_ID} main.py --src {SRC_DATA} --input {DATA_PATH} --save_dir {SAVE_PATH} --train_type remed --time {TIME} --pred_time {PRED_TIME} --wandb --wandb_project_name {PROJECT_NAME} --wandb_entity_name {ENTITY_NAME} --lr 1e-5 --scorer --scorer_use_time --pretrained {EXPERIMENT_NAME} --no_pretrained_checkpoint
 ```
+
+</details>
+
+## Support for MEDS dataset
+We officially support to process [MEDS](https://github.com/Medical-Event-Data-Standard/meds/releases/tag/0.3.0) dataset (currently, MEDS v0.3) with a cohort defined by [ACES](https://github.com/justin13601/ACES), only for the REMed model.
+It consists of 4 steps in total, each of which can be run by Python or shell scripts that are prepared in [`scripts/meds/`](scripts/meds/) directory.
+For more detailed information, please follow the instructions below.  
+Note that all the following commands should be run in the root directory of the repository, not in `scripts/meds/` or any other sub-directories.  
+Additionally, the following scripts assume your dataset is split into `"train"`, `"tuning"`, and `"held_out"` subsets for training, validation, and test, respecitvely. If it doesn't apply to your case, you can modify them by adding these command line arguments: `--train_subset`, `--valid_subset`, and `--test_subset`. For example, if you need to process only the train subset, you can specify it by adding `--train_subset="train" --valid_subset="" --test_subset=""`.
+
+### Processing MEDS dataset
+<details>
+<summary>Preprocessing MEDS dataset</summary>
+
+- We provide a script to preprocess MEDS dataset with a cohort defined by [ACES](https://github.com/justin13601/ACES) to meet the input format for REMed.
+```shell script
+$ python scripts/meds/process_meds.py $MEDS_PATH \
+    --cohort $ACES_COHORT_PATH \
+    --output_dir $PROCESSED_MEDS_DIR \
+    --rebase \
+    --workers $NUM_WORKERS
+```
+* `$MEDS_PATH`: path to MEDS dataset to be processed. It can be a directory or the exact file path with the file exenstion (only `.csv` or `.parquet` allowed). If provided with directory, it tries to scan all `*.csv` or `*.parquet` files contained in the directory recursively.
+* `$ACES_COHORT_PATH`: path to the defined cohort, which must be a result of [ACES](https://github.com/justin13601/ACES). It can be a directory or the exact file path that has the same file extension with the MEDS dataset to be processed. The file structure of this cohort directory should be the same with the provided MEDS dataset directory (`$MEDS_PATH`) to match each cohort to its corresponding shard data.
+* `$PROCESSED_MEDS_DIR`: directory to save processed outputs.
+* `$NUM_WORKERS`: number of parallel workes to multi-process the script.
+
+As a result of this script, you will have .h5 and .tsv files that has a following respective structure:
+* *.h5
+    ```
+    *.h5
+    └── ${cohort_id}
+        └── "ehr"
+            ├── “hi”
+            │	└── np.ndarray with a shape of (num_events, 3, max_length)
+            ├── “time”
+            │	└── np.ndarray with a shape of (num_events, )
+            └── “label”
+                └── binary label (0 or 1) for ${cohort_id} given the defined task
+    ```
+    * `${cohort_id}`: `"${patient_id}_${cohort_number}"`, standing for "N-th cohort in the patient"
+    * Numpy array under `"hi"`
+        * `[:, 0, :]`: token input ids for the tokenized events with a maximum length of `max_length`
+        * `[:, 1, :]`: token type ids to distinguish where each input token comes from (special tokens such as `[CLS]` or `[SEP]`, column keys, or column values), which was firstly used in GenHPF. Can be set to all zeros.
+        * `[:, 2, :]`: ids for digit place embedding, which also originated from GenHPF. It assigns different ids to each of digit places for numeric (integer or float) items. Also can be set to all zeros.
+    * Numpy array under `"time"`
+        * Elapsed time in minutes from the first event to the last event.
+    * E.g.,
+        ```Python
+        >>> import h5pickle
+        >>> f = h5pickle.File("train.h5", "r")
+        >>> f["ehr"]["10001472_0"]["hi"]
+        <HDF5 dataset "hi": shape (13, 3, 128), type "<i2">
+        >>> f["ehr"]["10001472_0"]["time"]
+        <HDF5 dataset "time": shape (13,), type "<i4">
+        >>> f["ehr"]["10001472_0"]["label"]
+        <HDF5 dataset "label": shape (), type "<i8">
+        ```
+* *.tsv
+    ```
+        patient_id	num_events
+    0	10001472_0	13
+    1	10002013_0	47
+    2	10002013_1	46
+    …	…		    …
+    ```
+
+</details>
+
+<details>
+<summary> Pretrain event encoder </summary>
+
+* This stage pretrains event encoder (e.g., GenHPF) using a random event sequence with a length of `max_seq_len` (by default, set to `128`) every epoch for each cohort sample.
+* After completing the pretraining, we should encode all the events in the dataset and cache them to reuse in the following stage.
+* For a shell script to run this, see [`./scripts/meds/pretrain.sh`](./scripts/meds/pretrain.sh).
+* For Python, please run:
+    ```shell script
+    accelerate launch \
+        --config_file config/single.json \
+        --num_processes 1 \
+        --gpu_ids $GPU_ID \
+        main.py \
+        --src_data meds \
+        --input_path $PROCESSED_MEDS_DIR \
+        --save_dir $PRETRAIN_SAVE_DIR \
+        --pred_targets meds_single_task \
+        --train_type short \
+        --lr 5e-5 \
+        --random_sample \
+        --encode_events \
+        # if you want to log using wandb
+        --wandb \
+        --wandb_entity_name $wandb_entity_name \
+        --wandb_project_name $wandb_project_name
+    ```
+    * `$PROCESSED_MEDS_DIR`: directory containing processed MEDS data, expected to contain `*.h5` and `*.tsv` files.
+    * `$PRETRAIN_SAVE_DIR`: output directory to save the checkpoint for the pretrained event encoder.
+    * `$GPU_ID`: GPU index to be used for training the model.
+    * It will pretrain event encoder using the processed MEDS data, which will be used to encode all events present in the MEDS data for the REMed model later.
+    * Checkpoint for the pretrained event encoder will be saved to `$PRETRAIN_SAVE_DIR/${EXPERIMENT_NAME}` directory, where `${EXPERIMENT_NAME}` is a 32-length hexadecimal string generated automatically for each unique experiment.
+
+</details>
+
+<details>
+<summary> Encode all events present in the input MEDS data, and cache them </summary>
+
+* In this stage, we encode all events present in the input MEDS data, and cache them, which will be input data for the REMed model.
+* For a shell script to run this, see [`./scripts/meds/encode_events.sh`](./scripts/meds/encode_events.sh).
+* For Python, please run:
+    ```shell script
+    accelerate launch \
+        --config_file config/single.json \
+        --num_processes 1 \
+        --gpu_ids="$GPU_ID" \
+        main.py \
+        --src_data meds \
+        --input_path $PROCESSED_MEDS_DIR \
+        --save_dir $ENCODED_MEDS_DIR \
+        --pred_targets meds_single_task \
+        --train_type short \
+        --random_sample \
+        --encode_events \
+        --encode_only \
+        --resume_name $PRETRAINED_CHECKPOINT_DIR
+    ```
+    * `$PROCESSED_MEDS_DIR`: directory containing processed MEDS data, expected to contain `*.h5` and `*.tsv` files.
+    * `$ENCODED_MEDS_DIR`: output directory to save the encoded data where the file names will be `*_encoded.h5`.
+    * `$GPU_ID`: GPU index to be used for running the model.
+    * `$PRETRAINED_CHECKPOINT_DIR`: directory containing checkpoint for the pretrained event encoder, expected to be `$PRETRAIN_SAVE_DIR/${EXPERIMENT_NAME}` containing `checkpoint_best.pt`.
+    * It will encode all events present in the processed meds data (`*.h5`) located in `$PROCESSED_MEDS_DIR`, and save the results into `ENCODED_MEDS_DIR/*_encoded.h5`.
+    * Note that it requires large empty disk space (>200G) to save all the encoded events to the storage. This process will take about 3 hours (for ~7500 steps).
+
+</details>
+
+<details>
+<summary> Train REMed using the encoded MEDS dataset</summary>
+
+* In this stage, we finally train the REMed model using the encoded MEDS data.
+* After training ends, it will save the best checkpoint for the trained REMed model.
+* For a shell script to run this, see [`./scripts/meds/train.sh`](./scripts/meds/train.sh).
+* For Python, please run:
+    ```shell script
+    accelerate launch \
+        --config_file config/single.json \
+        --num_processes 1 \
+        --gpu_ids $GPU_ID \
+        main.py \
+        --src_data meds \
+        --input_path $ENCODED_MEDS_DIR \
+        --save_dir $REMED_SAVE_DIR \
+        --pred_targets meds_single_task \
+        --train_type remed \
+        --lr 1e-5 \
+        --scorer \
+        --scorer_use_time \
+        # if you want to log using wandb
+        --wandb \
+        --wandb_entity_name $wandb_entity_name \
+        --wandb_project_name $wandb_project_name
+    ```
+    * `$ENCODED_MEDS_DIR`: directory containing encoded MEDS data, expected to contain `*_encoded.h5` files.
+    * `$REMED_SAVE_DIR`: output directory to save the REMed model checkpoint.
+    * `$GPU_ID`: GPU index to be used for running the model.
+
+</details>
+
+<details>
+<summary> Generate predicted results to the test cohort dataframe for a given task using trained REMed model </summary>
+
+* In this final stage, we load the trained REMed model to do prediction on the test cohort for a given task, and generate the predicted results as two additional columns, `predicted_label` and `predicted_prob`, to the test cohort dataframe.
+* For a shell script to run this, see [`./scripts/meds/predict.sh`](./scripts/meds/predict.sh).
+* For Python, please run:
+    ```shell script
+    accelerate launch \
+        --config_file config/single.json \
+        --num_processes 1 \
+        --gpu_ids $GPU_ID \
+        main.py \
+        --src_data meds \
+        --input_path $ENCODED_MEDS_DIR \
+        --save_dir $SAVE_DIR \
+        --pred_targets meds_single_task \
+        --train_type remed \
+        --scorer \
+        --scorer_use_time \
+        --test_only \
+        --test_cohort $ACES_TEST_COHORT_DIR \
+        --resume_name $CHECKPOINT_DIR
+    ```
+    * `$ENCODED_MEDS_DIR`: directory containing encoded MEDS data, expected to contain `*_encoded.h5` files.
+    * `$SAVE_DIR`: output directory to save the predicted results, which will be `$test_subset.parquet`. the results will be saved to `${SAVE_DIR}/${EXPERIMENT_NAME}` directory. this result file has the same rows with the test cohort dataframe provided with `$ACES_TEST_COHORT_DIR`, but has two additional columns: `predicted_label` and `predicted_prob`
+    * `$GPU_ID`: GPU index to be used for running the model.
+    * `$ACES_TEST_COHORT_DIR`: directory containing test cohorts generated from ACES, expected to contain `*.parquet` files.
+    * `$CHECKPOINT_DIR`: directory containing checkpoint for the trained REMed model, expected to be `$REMED_SAVE_DIR/${EXPERIMENT_NAME}`
 
 </details>
 

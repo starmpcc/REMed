@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from shutil import rmtree
 
 import h5py
+import polars as pl
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -26,9 +27,23 @@ class Trainer:
         set_seed(self.args.seed)
         if self.args.src_data == "meds":
             self.df = None # do not need this for meds dataset
-            self.train_subset = args.train_subset
-            self.valid_subset = args.valid_subset
-            self.test_dataset = args.test_subset
+            self.train_subset = args.train_subset if args.train_subset != "" else None
+            self.valid_subset = args.valid_subset if args.valid_subset != "" else None
+            self.test_subset = args.test_subset if args.test_subset != "" else None
+            self.test_cohort = args.test_cohort
+            if self.test_cohort is not None:
+                if os.path.isdir(self.test_cohort):
+                    test_cohort = pl.read_parquet(os.path.join(self.test_cohort, "*.parquet"))
+                else:
+                    test_cohort = pl.read_parquet(self.test_cohort)
+                test_cohort = test_cohort.with_columns(
+                    pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
+                )
+                test_cohort = test_cohort.with_columns(
+                    (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
+                )
+                test_cohort = test_cohort.drop("suffix")
+                self.test_cohort = test_cohort
         else:
             self.df = pd.read_csv(
                 os.path.join(
@@ -39,10 +54,11 @@ class Trainer:
             self.valid_subset = "valid"
             self.test_subset = "test"
 
+        self.log = None if self.args.debug or not self.args.wandb else "wandb"
+
     def run(self):
-        logging_method = None if self.args.debug or not self.args.wandb else "wandb"
         self.accelerator = Accelerator(
-            log_with=logging_method, split_batches=True, mixed_precision="bf16"
+            log_with=self.log, split_batches=True, mixed_precision="bf16"
         )
         self.args.local_batch_size = (
             self.args.batch_size // self.accelerator.num_processes
@@ -53,7 +69,7 @@ class Trainer:
             self.args.exp_name = f"{uuid.uuid4().hex}_{self.args.seed}"
 
         config = self.args if not self.args.encode_only else None
-        if logging_method == "wandb":
+        if self.log == "wandb":
             wandb_init_kwargs = {
                 "wandb": {
                     "entity": self.args.wandb_entity_name,
@@ -72,7 +88,8 @@ class Trainer:
         exp_encoded = broadcast(exp_encoded.to(self.accelerator.device))
         self.args.exp_name = "".join([chr(int(i)) for i in exp_encoded])
 
-        os.makedirs(os.path.join(self.args.save_dir, self.args.exp_name), exist_ok=True)
+        if not self.args.encode_only:
+            os.makedirs(os.path.join(self.args.save_dir, self.args.exp_name), exist_ok=True)
         logging.basicConfig(
             format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
             datefmt="%m/%d/%Y %H:%M:%S",
@@ -93,20 +110,22 @@ class Trainer:
             self.test()
 
         if self.args.encode_events or self.args.encode_only:
-            if self.src_data == "meds":
+            if self.args.src_data == "meds":
                 self.encode_events_meds()
             else:
                 self.encode_events()
+
         self.finish()
 
     def finish(self):
-        self.data.close()
+        if not self.args.src_data == "meds":
+            self.data.close()
         if self.accelerator.is_main_process:
             rmtree(
                 os.path.join(self.args.save_dir, self.args.exp_name, "checkpoint"),
                 ignore_errors=True,
             )
-            if not self.args.debug:
+            if self.log is not None:
                 self.accelerator.end_training()
         logger.info("done training", main_process_only=True)
 
@@ -178,26 +197,35 @@ class Trainer:
                 break
             self.n_epoch.increment()
 
+            logger.info("Save the last checkpoint.", main_process_only=True)
             self.accelerator.save_state(resume_path)
-            logger.info("save checkpoint...", main_process_only=True)
             self.accelerator.wait_for_everyone()
 
     def evaluation(self, n_epoch):
-        metric_dict = self.epoch(self.valid_subset, self.valid_loader, n_epoch)
         best_model_path = os.path.join(
             self.args.save_dir,
             self.args.exp_name,
             "checkpoint_best.pt",
         )
-        if self.early_stopping(metric_dict[self.metric.update_target]):
+        if self.valid_loader is None:
+            logger.info("No validation set found, save the last checkpoint.")
             state_dict = self.accelerator.unwrap_model(self.model).state_dict()
             self.accelerator.save(state_dict, best_model_path)
-            logger.info("save best model...", main_process_only=True)
+            return False
+
+        metric_dict = self.epoch(self.valid_subset, self.valid_loader, n_epoch)
+        if self.early_stopping(metric_dict[self.metric.update_target]):
+            state_dict = self.accelerator.unwrap_model(self.model).state_dict()
+            logger.info("Save the best checkpoint.", main_process_only=True)
+            self.accelerator.save(state_dict, best_model_path)
         return self.early_stopping.early_stop
 
     def test(self):
         logger.info("Start Testing", main_process_only=True)
         test_loader = self.dataloader_set(self.test_subset)
+        if test_loader is None:
+            logger.info("No test subset found, return without test")
+            return None
         best_model_path = os.path.join(
             self.args.save_dir,
             self.args.resume_name if self.args.test_only else self.args.exp_name,
@@ -219,9 +247,22 @@ class Trainer:
         self.model, self.test_loader = self.accelerator.prepare(model, test_loader)
         metric_dict = self.epoch(self.test_subset, self.test_loader)
 
+        if self.args.src_data == "meds" and self.args.test_cohort is not None:
+            if self.accelerator.num_processes == 1:
+                self.test_cohort.write_parquet(
+                    os.path.join(self.args.save_dir, self.args.exp_name, f"{self.test_subset}.parquet")
+                )
+            else:
+                logger.warning(
+                    "not yet implemented to output predicted labels and probs with "
+                    "--test_cohort in multi-processing environment. please run with "
+                    "--num_processes=1 in accelerate launch."
+                )
         return metric_dict
 
     def dataloader_set(self, split):
+        if split is None:
+            return None
         dataset = self.dataset(self.args, split, self.data, self.df)
         return DataLoader(
             dataset,
@@ -262,6 +303,7 @@ class Trainer:
                     and self.args.log_loss
                 ):
                     self.accelerator.log({f"{split}_loss": loss})
+                
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
         if self.args.debug:
@@ -394,14 +436,17 @@ class Trainer:
 
     # to add compatibility with meds dataset
     def encode_events_meds(self):
-        best_model_path = os.path.join(
-            self.args.save_dir,
-            self.args.exp_name,
-            "checkpoint_best.pt",
-        )
+        if self.args.encode_only:
+            best_model_path = os.path.join(self.args.resume_name, "checkpoint_best.pt")
+        else:
+            best_model_path = os.path.join(
+                self.args.save_dir, self.args.exp_name, "checkpoint_best.pt"
+            )
         if self.args.train_type != "bioclinicalbert_encode":
             model = self.architecture(self.args)
+            logger.info(f"Loading checkpoint from {best_model_path}")
             model = load_model(best_model_path, model)
+            logger.info("Successfully loaded the checkpoint")
             self.model = self.accelerator.prepare(model)
             self.args.max_seq_len = 1024
             self.args.batch_size = 8
@@ -424,14 +469,13 @@ class Trainer:
                 postfix = "" if i == -1 else "_" + str(i)
                 return os.path.join(
                     self.args.save_dir,
-                    self.args.exp_name,
                     f"{split}_encoded{postfix}.h5",
                 )
 
             hdf5_path = _get_hdf5_path(self.accelerator.local_process_index)
             logger.info("Writing metadata to HDF5")
 
-            with open(File(hdf5_path, "w")) as f:
+            with File(hdf5_path, "w") as f:
                 f.create_group("ehr")
                 encoded = f["ehr"]
 
@@ -454,7 +498,7 @@ class Trainer:
                 with torch.no_grad():
                     loader = enumerate(dataloader)
                     if self.accelerator.is_main_process:
-                        loader = tqdm(loader)
+                        loader = tqdm(loader, total=len(dataloader))
                     for i, batch in loader:
                         self.step = i
                         all_codes_embs = self.model.input2emb_model(**batch)
@@ -463,10 +507,18 @@ class Trainer:
                             all_codes_embs, **batch
                         )  # B, S, E
                         reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
-                        patient_ids = batch["patient_id"].cpu().numpy().reshape(-1)
-                        indices = batch["index"].cpu().numpy().reshape(-1)
-                        for repr, patient_id, index in zip(reprs, patient_ids, indices):
-                            patient_id, index = int(patient_id), int(index)
+                        patient_ids = batch["patient_id"].reshape(-1)
+                        indices = batch["index"].reshape(-1)
+                        labels = batch["label"]
+                        # assume it has only one key (expected "meds_single_task")
+                        key = next(iter(labels.keys()))
+                        for repr, patient_id, index, label in zip(
+                            reprs, patient_ids, indices, labels[key]
+                        ):
+                            if "label" not in encoded[str(patient_id)]:
+                                label = label.int().item()
+                                encoded[str(patient_id)].create_dataset("label", data=label)
+
                             start = self.args.max_seq_len * index
                             end = start + self.args.max_seq_len
                             max_len = encoded[str(patient_id)]["encoded"].shape[0]
@@ -521,4 +573,3 @@ class Trainer:
                     for i in range(self.accelerator.num_processes):
                         os.remove(_get_hdf5_path(i))
             self.accelerator.wait_for_everyone()
-            return

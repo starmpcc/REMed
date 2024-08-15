@@ -58,6 +58,16 @@ def get_parser():
         help="file name without extension to load data for the test. only used when `--src_data` "
             "is set to `'meds'`."
     )
+    parser.add_argument(
+        "--test_cohort",
+        type=str,
+        default=None,
+        help="path to the test cohort, which must be a result of ACES. it can be either of "
+            "directory or the exact file path that has .parquet file extension. if provided with "
+            "directory, it tries to load `${test_subset}`/*.parquet files in the directory. "
+            "note that the set of patient ids in this cohort should be matched with that in the "
+            "test dataset"
+    )
 
     parser.add_argument(
         "--pred_targets",
@@ -146,7 +156,7 @@ def get_parser():
         "--scheduler", action="store_true"
     )  # Warmup Scheduler (500 steps)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--n_epochs", type=int, default=1000)
 
     # Model

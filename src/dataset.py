@@ -182,11 +182,36 @@ class EHRforReprGen(BaseDataset):
             "index": torch.IntTensor([sample_idx]),
         }
 
+class ReprDataset(BaseDataset):
+    def __init__(self, args, split, data, df):
+        super().__init__(args, split, data, df)
+
+    def __getitem__(self, idx):
+        data = self.data[self.keys[idx]]
+        encoded = data["encoded"][:]
+        times = data["time"][:]
+        hi_start = np.searchsorted(times, self.args.time * 60)
+        if hi_start == encoded.shape[0]:
+            # If no event untile the time, return the last event (to prevent nan)
+            hi_start -= 1
+
+        encoded = torch.from_numpy(encoded[hi_start:]).view(torch.bfloat16).float()
+        times = times[hi_start:]
+
+        repr = torch.FloatTensor(encoded)
+        _times = torch.IntTensor(times)
+        return {
+            "repr": repr,
+            "times": _times,
+            "label": self.get_labels(data),
+        }
+
 class MEDSDataset(Dataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
         super().__init__()
 
         self.args = args
+        self.padding = "fixed"
 
         self.data = h5pickle.File(os.path.join(data_path, split + ".h5"))["ehr"]
         self.keys = list(self.data.keys())
@@ -197,9 +222,10 @@ class MEDSDataset(Dataset):
     def collate_fn(self, samples):
         ret = dict()
         max_sample_len = max([s["times"].shape[0] for s in samples])
-        padding_to = min(
-            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
-        )
+
+        padding_to = 2 ** math.ceil(math.log(max_sample_len, 2))
+        if self.padding == "fixed":
+            padding_to = min(padding_to, self.args.max_seq_len)
 
         for k, v in samples[0].items():
             if k == "times":
@@ -211,7 +237,7 @@ class MEDSDataset(Dataset):
                     torch.stack([s["label"] for s in samples])
                 )
             elif k in ["patient_id", "index"]: # for MEDSForReprGen
-                ret[k] = torch.stack([s[k] for s in samples])
+                ret[k] = np.array([s[k] for s in samples])
             else:
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
                 ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
@@ -245,6 +271,8 @@ class MEDSForReprGen(MEDSDataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
         super().__init__(args, split, data_path, *pargs, **kwargs)
 
+        self.padding = "fixed"
+
         num_samples_per_patient = pd.read_csv(
             os.path.join(data_path, split + ".tsv"), delimiter="\t"
         ).set_index("patient_id")
@@ -269,47 +297,47 @@ class MEDSForReprGen(MEDSDataset):
             )
         )
         data = self.data[str(patient_id)]
-        
+
         input = data["hi"]
         sample_idx_in_patient = idx - prev_idx
         start = self.args.max_seq_len * sample_idx_in_patient
         end = self.args.max_seq_len * (sample_idx_in_patient + 1)
+        label = torch.tensor([data["label"][()]]).float()
         return {
             "input_ids": torch.LongTensor(input[:, 0, :][start:end]),
             "type_ids": torch.LongTensor(input[:, 1, :][start:end]),
             "dpe_ids": torch.LongTensor(input[:, 2, :][start:end]),
             "times": torch.IntTensor(data["time"][start:end]),
-            "patient_id": torch.IntTensor([patient_id]),
-            "index": torch.IntTensor([sample_idx_in_patient])
+            "patient_id": patient_id,
+            "index": sample_idx_in_patient,
+            "label": label
         }
 
-class ReprDataset(BaseDataset):
-    def __init__(self, args, split, data, df):
-        super().__init__(args, split, data, df)
+class MEDSReprDataset(MEDSDataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        if not split.endswith("_encoded"):
+            split = split + "_encoded"
+        super().__init__(args, split, data_path, *pargs, **kwargs)
+
+        self.padding = "max"
 
     def __getitem__(self, idx):
         data = self.data[self.keys[idx]]
         encoded = data["encoded"][:]
         times = data["time"][:]
-        if self.args.src_data == "meds":
-            hi_start = 0
-        else:
-            hi_start = np.searchsorted(times, self.args.time * 60)
-            if hi_start == encoded.shape[0]:
-                # If no event untile the time, return the last event (to prevent nan)
-                hi_start -= 1
 
-        encoded = torch.from_numpy(encoded[hi_start:]).view(torch.bfloat16).float()
-        times = times[hi_start:]
+        encoded = torch.from_numpy(encoded).view(torch.bfloat16).float()
 
         repr = torch.FloatTensor(encoded)
-        _times = torch.IntTensor(times)
+        times = torch.IntTensor(times)
+        label = torch.tensor([data["label"][()]]).float()
+
         return {
             "repr": repr,
-            "times": _times,
-            "label": self.get_labels(data),
+            "times": times,
+            "label": label,
+            "patient_id": self.keys[idx]
         }
-
 
 class FlattenDataset(BaseDataset):
     def __init__(self, args, split, data, df):
