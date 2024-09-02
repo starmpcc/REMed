@@ -1,10 +1,13 @@
 import os
 import re
+import math
 import shutil
 import glob
+import time
 import functools
 from pathlib import Path
 from argparse import ArgumentParser
+from datetime import datetime
 
 import h5py
 import pandas as pd
@@ -14,7 +17,6 @@ from bisect import bisect_left, bisect_right
 
 import multiprocessing
 from tqdm import tqdm
-from tqdm.contrib.concurrent import process_map
 
 from transformers import AutoTokenizer
 
@@ -50,6 +52,12 @@ def get_parser():
             "to be processed. the file structure of this cohort directory should be the same with "
             "the provided MEDS dataset directory to match each cohort to its corresponding shard "
             "data."
+    )
+    parser.add_argument(
+        "--cohort_label_name",
+        type=str,
+        default="boolean_value",
+        help="column name in the cohort dataframe to be used for label"
     )
     parser.add_argument(
         "--output_dir",
@@ -109,6 +117,8 @@ def main(args):
     else:
         data_paths = [root_path]
 
+    label_col_name = args.cohort_label_name
+
     tokenizer = AutoTokenizer.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
 
     codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
@@ -137,6 +147,19 @@ def main(args):
             case _:
                 raise ValueError(f"Unsupported file format: {data_path.suffix}")
 
+        # do not allow to use static events or birth event
+        birth_code = "MEDS_BIRTH" # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
+        if birth_code not in codes_metadata:
+            print(
+                f"\"{birth_code}\" is not found in the codes metadata, which may lead to "
+                "unexpected results since we currently exclude this event from the input data. "
+            )
+
+        data = data.with_columns(
+            pl.when(pl.col("code") == birth_code)
+            .then(None)
+            .otherwise(pl.col("time")).alias("time")
+        )
         data = data.drop_nulls(subset=["patient_id", "time"])
 
         cohort_path = Path(args.cohort) / subdir / data_path.name
@@ -148,85 +171,102 @@ def main(args):
             case _:
                 raise ValueError(f"Unsupported file format: {cohort_path.suffix}")
 
-        cohort = cohort.drop_nulls()
+        cohort = cohort.drop_nulls(label_col_name)
 
         cohort = cohort.select(
             [pl.col("patient_id"),
-                pl.col("label"),
-                pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
-                pl.col("input.end_summary").struct.field("timestamp_at_end").alias("endtime")]
+                pl.col(label_col_name),
+                # pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
+                pl.col("prediction_time").alias("endtime")]
         )
         cohort = cohort.group_by(
             "patient_id", maintain_order=True
-        ).agg(pl.col(["starttime", "endtime", "label"])).collect()
+        ).agg(pl.col(["endtime", label_col_name])).collect() # omitted "starttime"
         cohort_dict = {
             x["patient_id"]: {
-                "starttime": x["starttime"],
+                # "starttime": x["starttime"],
                 "endtime": x["endtime"],
-                "label": x["label"],
+                "label": x[label_col_name],
             } for x in cohort.iter_rows(named=True)
         }
-        
+
         def extract_cohort(row):
             patient_id = row["patient_id"]
             time = row["time"]
             if patient_id not in cohort_dict:
-                return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
+                # return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
+                return {"cohort_end": None, "cohort_label": None}
 
             cohort_criteria = cohort_dict[patient_id]
-            starts = cohort_criteria["starttime"]
+            # starts = cohort_criteria["starttime"]
             ends = cohort_criteria["endtime"]
             labels = cohort_criteria["label"]
 
-            for start, end, label in zip(starts, ends, labels):
-                if start <= time and time <= end:
-                    return {"cohort_start": start, "cohort_end": end, "cohort_label": label}
+            # for start, end, label in zip(starts, ends, labels):
+            #     if start <= time and time <= end:
+            #         return {"cohort_start": start, "cohort_end": end, "cohort_label": label}
 
-            return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
+            # assume it is possible that each event goes into multiple different cohorts
+            cohort_ends = []
+            cohort_labels = []
+            for end, label in zip(ends, labels):
+                if time <= end:
+                    # return {"cohort_start": start, "cohort_end": end, "cohort_label": label}
+                    cohort_ends.append(end)
+                    cohort_labels.append(label)
+
+            if len(cohort_ends) > 0:
+                return {"cohort_end": cohort_ends, "cohort_label": cohort_labels}
+            else:
+                # return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
+                return {"cohort_end": None, "cohort_label": None}
 
         data = data.group_by(["patient_id", "time"], maintain_order=True).agg(pl.all())
-
         data = data.with_columns(
-            pl.struct(["patient_id", "time"]).map_elements(extract_cohort).alias("cohort_criteria")
+            pl.struct(["patient_id", "time"])
+            .map_elements(
+                extract_cohort,
+                return_dtype=pl.Struct(
+                    {"cohort_end": pl.List(pl.Datetime()), "cohort_label": pl.List(pl.Boolean)}
+                )
+            )
+            .alias("cohort_criteria")
         ).unnest("cohort_criteria").collect()
-        
-        data = data.drop_nulls("cohort_label")
-        data = data.group_by(
-            ["patient_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
-        ).agg(pl.all())
 
-        # regard {patient_id} as {cohort_id}: {patient_id}_{cohort_number}
+        data = data.drop_nulls("cohort_label")
+
+        data = data.with_columns(pl.col("time").dt.strftime("%Y-%m-%d %H:%M:%S").cast(pl.List(str)))
         data = data.with_columns(
-            pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
+            pl.col("time").list.sample(n=pl.col("code").list.len(), with_replacement=True)
         )
-        data = data.with_columns(
-            (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
-        )
-        data = data.drop("suffix", "cohort_start", "cohort_end")
 
         if str(subdir) != ".":
             output_name = str(subdir)
         else:
             output_name = data_path.stem
 
-        with (
-            h5py.File(str(output_dir / (output_name + ".h5")), "a") as f,
-            open(str(output_dir / (output_name + ".tsv")), "a") as manifest_f
-        ):
-            if "ehr" in f:
-                result = f["ehr"]
-            else:
-                result = f.create_group("ehr")
+        if not os.path.exists(output_dir / output_name):
+            os.makedirs(output_dir / output_name)
 
+        with open(str(output_dir / (output_name + ".tsv")), "a") as manifest_f:
             if os.path.getsize(output_dir / (output_name + ".tsv")) == 0:
-                manifest_f.write("patient_id\tnum_events\n")
+                manifest_f.write("patient_id\tnum_events\tshard_id\n")
 
-            must_have_columns = ["patient_id", "cohort_label", "time", "code", "numeric_value"]
+            must_have_columns = [
+                "patient_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
+            ]
             rest_of_columns = [x for x in data.columns if x not in must_have_columns]
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
 
             meds_to_remed_partial = functools.partial(
-                meds_to_remed, tokenizer, rest_of_columns, column_name_idcs, codes_metadata,
+                meds_to_remed,
+                tokenizer,
+                rest_of_columns,
+                column_name_idcs,
+                codes_metadata,
+                output_dir,
+                output_name,
+                args.workers,
                 # NOTE this will be omitted in the future when the related issue is solved
                 # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
                 d_items,
@@ -234,52 +274,61 @@ def main(args):
             )
 
             # meds --> remed
+            print("Processing...")
             if args.workers <= 1:
-                remeds = []
-                for cohort_sample in tqdm(data.iter_rows(), total=len(data)):
-                    cohort_result = meds_to_remed_partial(cohort_sample)
-                    remeds.append(cohort_result)
+                length_per_subject_gathered = [meds_to_remed_partial(data)]
+                del data
             else:
-                remeds = process_map(
-                    meds_to_remed_partial,
-                    data.iter_rows(),
-                    max_workers=args.workers,
+                patient_ids = data["patient_id"].unique().to_list()
+                chunksize = math.ceil(len(patient_ids) / args.workers)
+                data_chunks = []
+                for i in range(0, len(patient_ids), chunksize):
+                    data_chunks.append(
+                        data.filter(pl.col("patient_id").is_in(patient_ids[i:i+chunksize]))
+                    )
+                del data
+                pool = multiprocessing.get_context("spawn").Pool(processes=args.workers)
+                # the order is preserved
+                length_per_subject_gathered = pool.map(meds_to_remed_partial, data_chunks)
+                del data_chunks
+
+            if len(length_per_subject_gathered) != args.workers:
+                print(
+                    "Number of processed workers were smaller than the specified num workers "
+                    "(--workers) due to the small size of data. Consider reducing the number of "
+                    "workers."
                 )
 
-            for r in tqdm(remeds, total=len(remeds)):
-                sample_result = result.create_group(r[0]) # cohort_id: {patient_id}_{cohort_number}
-                sample_result.create_dataset(
-                    "hi", data=r[1], dtype="i2", compression="lzf", shuffle=True
-                )
-                sample_result.create_dataset("time", data=r[2], dtype="i")
-                sample_result.create_dataset("label", data=r[3])
-
-                manifest_f.write(f"{r[0]}\t{len(r[1])}\n")
+            for length_per_subject in length_per_subject_gathered:
+                for subject_id, (length, shard_id) in length_per_subject.items():
+                    manifest_f.write(f"{subject_id}\t{length}\t{shard_id}\n")
 
 def meds_to_remed(
     tokenizer,
     rest_of_columns,
     column_name_idcs,
     codes_metadata,
+    output_dir,
+    output_name,
+    num_shards,
     # NOTE this will be omitted in the future when the related issue is solved
     # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
     d_items,
     d_labitems,
-    cohort_sample
+    df_chunk
 ):
     code_matching_pattern = re.compile(r"\d+")
 
-    events = []
-    times = []
-    digit_offsets = []
-    col_name_offsets = []
-    for time_i, t in enumerate(cohort_sample[column_name_idcs["time"]]):
-        for event_j in range(len(cohort_sample[column_name_idcs["code"]][time_i])):
+    def meds_to_remed_unit(row):
+        events = []
+        digit_offsets = []
+        col_name_offsets = []
+        for event_index in range(len(row[column_name_idcs["code"]])):
             event = ""
             digit_offset = []
             col_name_offset = []
             for col_name in ["code", "numeric_value"] + rest_of_columns:
-                col_event = cohort_sample[column_name_idcs[col_name]][time_i][event_j]
+                col_event = row[column_name_idcs[col_name]][event_index]
 
                 if col_event is not None:
                     col_event = str(col_event)
@@ -347,86 +396,156 @@ def meds_to_remed(
                     event += " " + col_name + " " + col_event
             if len(event) > 0:
                 events.append(event[1:])
-                times.append(t)
                 digit_offsets.append(digit_offset)
                 col_name_offsets.append(col_name_offset)
 
-    tokenized_events = tokenizer(
-        events,
-        add_special_tokens=True,
-        padding="max_length",
-        max_length=128,
-        truncation=True,
-        return_tensors="np",
-        return_token_type_ids=False,
-        return_attention_mask=True,
-        return_offsets_mapping=True
-    )
-    lengths_before_padding = tokenized_events["attention_mask"].sum(axis=1)
+        tokenized_events = tokenizer(
+            events,
+            add_special_tokens=True,
+            padding="max_length",
+            max_length=128,
+            truncation=True,
+            return_tensors="np",
+            return_token_type_ids=False,
+            return_attention_mask=True,
+            return_offsets_mapping=True
+        )
+        lengths_before_padding = tokenized_events["attention_mask"].sum(axis=1)
 
-    input_ids = tokenized_events["input_ids"]
-    dpe_ids = np.zeros(input_ids.shape, dtype=int)
-    for i, digit_offset in enumerate(digit_offsets):
-        for start, end in digit_offset:
-            start_index, end_index = find_boundary_between(
-                tokenized_events[i].offsets[:lengths_before_padding[i]-1], start, end
-            )
-
-            # define dpe ids for digits found
-            num_digits = end_index - start_index
-            # 119: token id for "."
-            num_decimal_points = (input_ids[i][start_index:end_index] == 119).sum()
-
-            # integer without decimal point
-            # e.g., for "1 2 3 4 5", assign [10, 9, 8, 7, 6]
-            if num_decimal_points == 0:
-                dpe_ids[i][start_index:end_index] = list(range(num_digits + 5, 5, -1))
-            # floats
-            # e.g., for "1 2 3 4 5 . 6 7 8 9", assign [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
-            elif num_decimal_points == 1:
-                num_decimals = num_digits - np.where(
-                    input_ids[i][start_index:end_index] == 119 # 119: token id for "."
-                )[0][0]
-                dpe_ids[i][start_index:end_index] = list(
-                    range(num_digits + 5 - num_decimals, 5 - num_decimals, -1)
+        input_ids = tokenized_events["input_ids"]
+        dpe_ids = np.zeros(input_ids.shape, dtype=int)
+        for i, digit_offset in enumerate(digit_offsets):
+            for start, end in digit_offset:
+                start_index, end_index = find_boundary_between(
+                    tokenized_events[i].offsets[:lengths_before_padding[i]-1], start, end
                 )
-            # 1 > decimal points where we cannot define dpe ids
+
+                # define dpe ids for digits found
+                num_digits = end_index - start_index
+                # 119: token id for "."
+                num_decimal_points = (input_ids[i][start_index:end_index] == 119).sum()
+
+                # integer without decimal point
+                # e.g., for "1 2 3 4 5", assign [10, 9, 8, 7, 6]
+                if num_decimal_points == 0:
+                    dpe_ids[i][start_index:end_index] = list(range(num_digits + 5, 5, -1))
+                # floats
+                # e.g., for "1 2 3 4 5 . 6 7 8 9", assign [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+                elif num_decimal_points == 1:
+                    num_decimals = num_digits - np.where(
+                        input_ids[i][start_index:end_index] == 119 # 119: token id for "."
+                    )[0][0]
+                    dpe_ids[i][start_index:end_index] = list(
+                        range(num_digits + 5 - num_decimals, 5 - num_decimals, -1)
+                    )
+                # 1 > decimal points where we cannot define dpe ids
+                else:
+                    continue
+        # define type ids
+        # for column names: 2
+        # for column values (contents): 3
+        # for CLS tokens: 5
+        # for SEP tokens: 6
+        type_ids = np.zeros(input_ids.shape, dtype=int)
+        type_ids[:, 0] = 5 # CLS tokens
+        for i, col_name_offset in enumerate(col_name_offsets):
+            type_ids[i][lengths_before_padding[i]-1] = 6 # SEP tokens
+            # fill with type ids for column values
+            type_ids[i][1:lengths_before_padding[i]-1] = 3
+            for start, end in col_name_offset:
+                start_index, end_index = find_boundary_between(
+                    tokenized_events[i].offsets[1:lengths_before_padding[i]-1], start, end
+                )
+                # the first offset is always (0, 0) for CLS token, so we adjust it
+                start_index += 1
+                end_index += 1
+                # finally replace with type ids for column names
+                type_ids[i][start_index:end_index] = 2
+
+        return np.stack([input_ids, type_ids, dpe_ids], axis=1).astype(np.uint16)
+
+    events_data = []
+    worker_id = multiprocessing.current_process().name.split("-")[-1]
+    if worker_id == "MainProcess":
+        worker_id = 0
+    else:
+        # worker_id is incremental for every generated pool, so divide with num_shards
+        worker_id = (int(worker_id) - 1) % num_shards # 1-based -> 0-based indexing
+    if worker_id == 0:
+        progress_bar = tqdm(df_chunk.iter_rows(), total=len(df_chunk))
+        progress_bar.set_description(f"Processing from worker-{worker_id}:")
+    else:
+        progress_bar = df_chunk.iter_rows()
+
+    for row in progress_bar:
+        events_data.append(meds_to_remed_unit(row))
+    data_length = list(map(len, events_data))
+    data_index_offset = np.zeros(len(data_length), dtype=np.int64)
+    data_index_offset[1:] = np.cumsum(data_length[:-1])
+    data_index = pl.Series(
+        "data_index",
+        map(
+            lambda x: [data_index_offset[x] + y for y in range(data_length[x])],
+            range(len(data_length))
+        )
+    )
+    events_data = np.concatenate(events_data)
+
+    df_chunk = df_chunk.select(
+        ["patient_id", "cohort_end", "cohort_label", "time"]
+    )
+    df_chunk = df_chunk.insert_column(4, data_index)
+    df_chunk = df_chunk.explode(["cohort_end", "cohort_label"])
+    df_chunk = df_chunk.group_by(
+        # ["patient_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
+        ["patient_id", "cohort_end", "cohort_label"], maintain_order=True
+    ).agg(pl.all())
+
+    # regard {patient_id} as {cohort_id}: {patient_id}_{cohort_number}
+    df_chunk = df_chunk.with_columns(
+        pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
+    )
+    df_chunk = df_chunk.with_columns(
+        (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
+    )
+    # data = data.drop("suffix", "cohort_start", "cohort_end")
+    df_chunk = df_chunk.drop("suffix", "cohort_end")
+
+    length_per_subject = {}
+    progress_bar = tqdm(
+        df_chunk.iter_rows(),
+        total=len(df_chunk),
+        desc=f"Writing data from worker-{worker_id}:"
+    )
+
+    for sample in progress_bar:
+        with h5py.File(str(output_dir / output_name / (output_name + f"_{worker_id}.h5")), "a") as f:
+            if "ehr" in f:
+                result = f["ehr"]
             else:
-                continue
-    # define type ids
-    # for column names: 2
-    # for column values (contents): 3
-    # for CLS tokens: 5
-    # for SEP tokens: 6
-    type_ids = np.zeros(input_ids.shape, dtype=int)
-    type_ids[:, 0] = 5 # CLS tokens
-    for i, col_name_offset in enumerate(col_name_offsets):
-        type_ids[i][lengths_before_padding[i]-1] = 6 # SEP tokens
-        # fill with type ids for column values
-        type_ids[i][1:lengths_before_padding[i]-1] = 3
-        for start, end in col_name_offset:
-            start_index, end_index = find_boundary_between(
-                tokenized_events[i].offsets[1:lengths_before_padding[i]-1], start, end
+                result = f.create_group("ehr")
+
+            sample_result = result.create_group(sample[0])
+
+            data_indices = np.concatenate(sample[3])
+            data = events_data[data_indices]
+            sample_result.create_dataset(
+                "hi", data=data, dtype="i2", compression="lzf", shuffle=True
             )
-            # the first offset is always (0, 0) for CLS token, so we adjust it
-            start_index += 1
-            end_index += 1
-            # finally replace with type ids for column names
-            type_ids[i][start_index:end_index] = 2
 
-    sample_data = np.stack([input_ids, type_ids, dpe_ids], axis=1).astype(np.int16)
+            times = np.concatenate(sample[2])
+            times = [datetime.strptime(x, "%Y-%m-%d %H:%M:%S") for x in times]
+            times = np.cumsum(np.diff(times))
+            times = list(map(lambda x: round(x.total_seconds() / 60), times))
+            times = np.array([0] + times)
 
-    times = np.cumsum(np.diff(times))
-    times = list(map(lambda x: round(x.total_seconds() / 60), times))
-    times = np.array([0] + times)
+            sample_result.create_dataset("time", data=times, dtype="i")
+            sample_result.create_dataset("label", data=int(sample[1]))
 
-    label = cohort_sample[column_name_idcs["cohort_label"]]
-    # NOTE temporary hack to binarize the label
-    if label > 1:
-        label = 1
-    patient_id = cohort_sample[column_name_idcs["patient_id"]]
+            length_per_subject[sample[0]] = (len(times), worker_id)
+    del df_chunk
 
-    return (patient_id, sample_data, times, label, )
+    return length_per_subject
 
 if __name__ == "__main__":
     parser = get_parser()

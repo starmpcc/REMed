@@ -156,7 +156,7 @@ def get_parser():
         "--scheduler", action="store_true"
     )  # Warmup Scheduler (500 steps)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--n_epochs", type=int, default=1000)
 
     # Model

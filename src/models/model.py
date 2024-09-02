@@ -392,7 +392,6 @@ class REMed(nn.Module):
                     (_topk_values.unsqueeze(-1) * res["pred"][k]).reshape(B, K, -1),
                     dim=1,
                 )
-
         else:
             topk[:, 0, :] = torch.where(
                 topk[:, 0, :].sum(dim=-1, keepdim=True) == 0,

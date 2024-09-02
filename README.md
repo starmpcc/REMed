@@ -49,7 +49,7 @@ model(reprs, times) # Return probability between [0,1] (B, 1)
 
 - For preprocessing: `python>=3.8, Java>=8`
 ```bash
-pip install numpy pandas tqdm treelib transformers pyspark
+pip install numpy pandas tqdm treelib transformers pyspark polars
 ```
 
 - For training & test
@@ -99,9 +99,26 @@ python main.py --ehr eicu --data {eICU Path} --obs_size 48 --pred_size 24 --max_
 - This requires large empty disk space (>200G)
 
 ```bash
-accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {GPU_ID} main.py --src {SRC_DATA} --input {DATA_PATH} --save_dir {SAVE_PATH} --train_type short --time -99999 --pred_time {PRED_TIME} --wandb_project_name {PROJECT_NAME} --wandb_entity_name {ENTITY_NAME} --lr 5e-5 --random_sample --encode_events
+accelerate launch \
+    --config_file config/single.json \
+    --num_processes 1 \
+    --gpu_ids ${GPU_ID} \
+    main.py \
+    --src ${SRC_DATA} \
+    --input ${DATA_PATH} \
+    --save_dir ${SAVE_PATH} \
+    --train_type short \
+    --time -99999 \
+    --pred_time ${PRED_TIME} \
+    --lr 5e-5 \
+    --random_sample \
+    --encode_events \
+    # if you want to log using wandb
+    --wandb \
+    --wandb_project_name ${PROJECT_NAME} \
+    --wandb_entity_name ${ENTITY_NAME} \
 ```
-- As a result, you can get `{SRC_DATA}_encoded.h5` at `{SAVE_PATH}/{EXPERIMENT_NAME}`.
+- As a result, you can get `${SRC_DATA}_encoded.h5` at `${SAVE_PATH}/${EXPERIMENT_NAME}`.
 
 
 </details>
@@ -109,11 +126,30 @@ accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {
 <details>
 <summary>Train REMed</summary>
 
-- Note that the `{EXPERIMENT_NAME}` refers to the name of the pre-training experiment.
+- Note that the `${EXPERIMENT_NAME}` refers to the name of the pre-training experiment.
 - If you want to run an experiment with infinite observation window, set time=-99999
 - Otherwise, the time should be {PRED_TIME} - {OBS_SIZE} (e.g. pred time 48h, obs 12h -> time 36)
 ```bash
-accelerate launch --config_file config/single.json --num_processes 1 --gpu_ids {GPU_ID} main.py --src {SRC_DATA} --input {DATA_PATH} --save_dir {SAVE_PATH} --train_type remed --time {TIME} --pred_time {PRED_TIME} --wandb --wandb_project_name {PROJECT_NAME} --wandb_entity_name {ENTITY_NAME} --lr 1e-5 --scorer --scorer_use_time --pretrained {EXPERIMENT_NAME} --no_pretrained_checkpoint
+accelerate launch \
+    --config_file config/single.json \
+    --num_processes 1 \
+    --gpu_ids ${GPU_ID} \
+    main.py \
+    --src ${SRC_DATA} \
+    --input ${DATA_PATH} \
+    --save_dir ${SAVE_PATH} \
+    --train_type remed \
+    --time ${TIME} \
+    --pred_time ${PRED_TIME} \
+    --lr 1e-5 \
+    --scorer \
+    --scorer_use_time \
+    --pretrained ${EXPERIMENT_NAME} \
+    --no_pretrained_checkpoint \
+    # if you want to log using wandb
+    --wandb \
+    --wandb_project_name ${PROJECT_NAME} \
+    --wandb_entity_name ${ENTITY_NAME}
 ```
 
 </details>
@@ -129,58 +165,58 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
 <details>
 <summary>Preprocessing MEDS dataset</summary>
 
-- We provide a script to preprocess MEDS dataset with a cohort defined by [ACES](https://github.com/justin13601/ACES) to meet the input format for REMed.
-```shell script
-$ python scripts/meds/process_meds.py $MEDS_PATH \
-    --cohort $ACES_COHORT_PATH \
-    --output_dir $PROCESSED_MEDS_DIR \
-    --rebase \
-    --workers $NUM_WORKERS
-```
-* `$MEDS_PATH`: path to MEDS dataset to be processed. It can be a directory or the exact file path with the file exenstion (only `.csv` or `.parquet` allowed). If provided with directory, it tries to scan all `*.csv` or `*.parquet` files contained in the directory recursively.
-* `$ACES_COHORT_PATH`: path to the defined cohort, which must be a result of [ACES](https://github.com/justin13601/ACES). It can be a directory or the exact file path that has the same file extension with the MEDS dataset to be processed. The file structure of this cohort directory should be the same with the provided MEDS dataset directory (`$MEDS_PATH`) to match each cohort to its corresponding shard data.
-* `$PROCESSED_MEDS_DIR`: directory to save processed outputs.
-* `$NUM_WORKERS`: number of parallel workes to multi-process the script.
-
-As a result of this script, you will have .h5 and .tsv files that has a following respective structure:
-* *.h5
+* We provide a script to preprocess MEDS dataset with a cohort defined by [ACES](https://github.com/justin13601/ACES) to meet the input format for REMed.
+    ```shell script
+    $ python scripts/meds/process_meds.py $MEDS_PATH \
+        --cohort $ACES_COHORT_PATH \
+        --output_dir $PROCESSED_MEDS_DIR \
+        --rebase \
+        --workers $NUM_WORKERS
     ```
-    *.h5
-    └── ${cohort_id}
-        └── "ehr"
-            ├── “hi”
-            │	└── np.ndarray with a shape of (num_events, 3, max_length)
-            ├── “time”
-            │	└── np.ndarray with a shape of (num_events, )
-            └── “label”
-                └── binary label (0 or 1) for ${cohort_id} given the defined task
-    ```
-    * `${cohort_id}`: `"${patient_id}_${cohort_number}"`, standing for "N-th cohort in the patient"
-    * Numpy array under `"hi"`
-        * `[:, 0, :]`: token input ids for the tokenized events with a maximum length of `max_length`
-        * `[:, 1, :]`: token type ids to distinguish where each input token comes from (special tokens such as `[CLS]` or `[SEP]`, column keys, or column values), which was firstly used in GenHPF. Can be set to all zeros.
-        * `[:, 2, :]`: ids for digit place embedding, which also originated from GenHPF. It assigns different ids to each of digit places for numeric (integer or float) items. Also can be set to all zeros.
-    * Numpy array under `"time"`
-        * Elapsed time in minutes from the first event to the last event.
-    * E.g.,
-        ```Python
-        >>> import h5pickle
-        >>> f = h5pickle.File("train.h5", "r")
-        >>> f["ehr"]["10001472_0"]["hi"]
-        <HDF5 dataset "hi": shape (13, 3, 128), type "<i2">
-        >>> f["ehr"]["10001472_0"]["time"]
-        <HDF5 dataset "time": shape (13,), type "<i4">
-        >>> f["ehr"]["10001472_0"]["label"]
-        <HDF5 dataset "label": shape (), type "<i8">
+    * `$MEDS_PATH`: path to MEDS dataset to be processed. It can be a directory or the exact file path with the file exenstion (only `.csv` or `.parquet` allowed). If provided with directory, it tries to scan all `*.csv` or `*.parquet` files contained in the directory recursively.
+    * `$ACES_COHORT_PATH`: path to the defined cohort, which must be a result of [ACES](https://github.com/justin13601/ACES). It can be a directory or the exact file path that has the same file extension with the MEDS dataset to be processed. The file structure of this cohort directory should be the same with the provided MEDS dataset directory (`$MEDS_PATH`) to match each cohort to its corresponding shard data.
+    * `$PROCESSED_MEDS_DIR`: directory to save processed outputs.
+    * `$NUM_WORKERS`: number of parallel workes to multi-process the script.
+    * **NOTE: If you encounter this error:** _"polars' maximum length reached. consider installing 'polars-u64-idx'"_, **please consider using more workers or doing `pip install polars-u64-idx`.**
+* As a result of this script, you will have .h5 and .tsv files that has a following respective structure:
+    * *.h5
         ```
-* *.tsv
-    ```
-        patient_id	num_events
-    0	10001472_0	13
-    1	10002013_0	47
-    2	10002013_1	46
-    …	…		    …
-    ```
+        *.h5
+        └── ${cohort_id}
+            └── "ehr"
+                ├── “hi”
+                │	└── np.ndarray with a shape of (num_events, 3, max_length)
+                ├── “time”
+                │	└── np.ndarray with a shape of (num_events, )
+                └── “label”
+                    └── binary label (0 or 1) for ${cohort_id} given the defined task
+        ```
+        * `${cohort_id}`: `"${patient_id}_${cohort_number}"`, standing for "N-th cohort in the patient"
+        * Numpy array under `"hi"`
+            * `[:, 0, :]`: token input ids for the tokenized events with a maximum length of `max_length`
+            * `[:, 1, :]`: token type ids to distinguish where each input token comes from (special tokens such as `[CLS]` or `[SEP]`, column keys, or column values), which was firstly used in GenHPF. Can be set to all zeros.
+            * `[:, 2, :]`: ids for digit place embedding, which also originated from GenHPF. It assigns different ids to each of digit places for numeric (integer or float) items. Also can be set to all zeros.
+        * Numpy array under `"time"`
+            * Elapsed time in minutes from the first event to the last event.
+        * E.g.,
+            ```Python
+            >>> import h5pickle
+            >>> f = h5pickle.File("train.h5", "r")
+            >>> f["ehr"]["10001472_0"]["hi"]
+            <HDF5 dataset "hi": shape (13, 3, 128), type "<i2">
+            >>> f["ehr"]["10001472_0"]["time"]
+            <HDF5 dataset "time": shape (13,), type "<i4">
+            >>> f["ehr"]["10001472_0"]["label"]
+            <HDF5 dataset "label": shape (), type "<i8">
+            ```
+    * *.tsv
+        ```
+            patient_id	num_events
+        0	10001472_0	13
+        1	10002013_0	47
+        2	10002013_1	46
+        …	…		    …
+        ```
 
 </details>
 

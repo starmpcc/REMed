@@ -213,19 +213,27 @@ class MEDSDataset(Dataset):
         self.args = args
         self.padding = "fixed"
 
-        self.data = h5pickle.File(os.path.join(data_path, split + ".h5"))["ehr"]
-        self.keys = list(self.data.keys())
+        # read and record data manifest if needed
+        self.manifest = pd.read_csv(
+            os.path.join(data_path, split + ".tsv"), delimiter="\t"
+        ).set_index("patient_id")
+
+        unique_shard_ids = self.manifest["shard_id"].unique()
+        self.data = {}
+        for shard_id in unique_shard_ids:
+            self.data[shard_id] = (
+                h5pickle.File(os.path.join(data_path, split, split + f"_{shard_id}.h5"))["ehr"]
+            )
 
     def __len__(self):
-        return len(self.data)
+        return len(self.manifest)
 
     def collate_fn(self, samples):
         ret = dict()
         max_sample_len = max([s["times"].shape[0] for s in samples])
-
-        padding_to = 2 ** math.ceil(math.log(max_sample_len, 2))
-        if self.padding == "fixed":
-            padding_to = min(padding_to, self.args.max_seq_len)
+        padding_to = min(
+            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
+        )
 
         for k, v in samples[0].items():
             if k == "times":
@@ -245,7 +253,9 @@ class MEDSDataset(Dataset):
         return ret
 
     def __getitem__(self, idx):
-        data = self.data[self.keys[idx]]
+        patient_id = self.manifest.index[idx]
+        shard_id = self.manifest.iloc[idx]["shard_id"]
+        data = self.data[shard_id][str(patient_id)]
         input = data["hi"][:]
         times = data["time"][:]
         # assume it is a scalar value for a binary classification task
@@ -271,32 +281,26 @@ class MEDSForReprGen(MEDSDataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
         super().__init__(args, split, data_path, *pargs, **kwargs)
 
-        self.padding = "fixed"
-
-        num_samples_per_patient = pd.read_csv(
-            os.path.join(data_path, split + ".tsv"), delimiter="\t"
-        ).set_index("patient_id")
-        num_samples_per_patient["num_samples"] = num_samples_per_patient["num_events"].map(
+        self.manifest["num_samples"] = self.manifest["num_events"].map(
             lambda x: math.ceil(x / args.max_seq_len)
         )
-        num_samples_per_patient["last_sample_index"] = np.cumsum(num_samples_per_patient["num_samples"])
-
-        self.num_samples_per_patient = num_samples_per_patient
+        self.manifest["last_sample_index"] = np.cumsum(self.manifest["num_samples"])
 
     def __len__(self):
-        return self.num_samples_per_patient["last_sample_index"].max()
+        return self.manifest["last_sample_index"].max()
 
     def __getitem__(self, idx):
         patient_index = (
-            self.num_samples_per_patient["last_sample_index"].searchsorted(idx, side="right")
+            self.manifest["last_sample_index"].searchsorted(idx, side="right")
         )
-        patient_id = self.num_samples_per_patient.index[patient_index]
+        patient_id = self.manifest.index[patient_index]
+        shard_id = self.manifest.iloc[patient_index]["shard_id"]
         prev_idx = (
             0 if patient_index == 0 else (
-                self.num_samples_per_patient["last_sample_index"].iloc[patient_index - 1]
+                self.manifest["last_sample_index"].iloc[patient_index - 1]
             )
         )
-        data = self.data[str(patient_id)]
+        data = self.data[shard_id][str(patient_id)]
 
         input = data["hi"]
         sample_idx_in_patient = idx - prev_idx
@@ -313,16 +317,51 @@ class MEDSForReprGen(MEDSDataset):
             "label": label
         }
 
-class MEDSReprDataset(MEDSDataset):
+class MEDSReprDataset(Dataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__()
+
+        self.args = args
+ 
         if not split.endswith("_encoded"):
             split = split + "_encoded"
-        super().__init__(args, split, data_path, *pargs, **kwargs)
 
-        self.padding = "max"
+        self.data = h5pickle.File(os.path.join(data_path, split + ".h5"))["ehr"]
+        self.manifest = list(self.data.keys())
+
+    def __len__(self):
+        return len(self.data)
+
+    def collate_fn(self, samples):
+        ret = dict()
+        max_sample_len = max([s["times"].shape[0] for s in samples])
+        padding_to = min(
+            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
+        )
+
+        for k, v in samples[0].items():
+            if k == "times":
+                padded = pad_sequence([s["times"] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, padding_to - padded.shape[1]))
+            elif k == "label":
+                ret[k] = {}
+                ret[k]["meds_single_task"] = torch.FloatTensor(
+                    torch.stack([s["label"] for s in samples])
+                )
+            elif k == "patient_id":
+                ret[k] = np.array([s[k] for s in samples])
+            elif k == "repr":
+                padded = pad_sequence([s[k] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
+            else:
+                raise ValueError(
+                    f"Invalid key from the output of __getitem__ in {self.__class__}: {k}"
+                )
+
+        return ret
 
     def __getitem__(self, idx):
-        data = self.data[self.keys[idx]]
+        data = self.data[self.manifest[idx]]
         encoded = data["encoded"][:]
         times = data["time"][:]
 
@@ -336,7 +375,7 @@ class MEDSReprDataset(MEDSDataset):
             "repr": repr,
             "times": times,
             "label": label,
-            "patient_id": self.keys[idx]
+            "patient_id": self.manifest[idx]
         }
 
 class FlattenDataset(BaseDataset):

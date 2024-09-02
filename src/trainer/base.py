@@ -1,10 +1,10 @@
 import logging
 import os
 import uuid
+import heapq
 from contextlib import nullcontext
 from shutil import rmtree
 
-import h5py
 import polars as pl
 import torch
 from accelerate import Accelerator
@@ -32,6 +32,7 @@ class Trainer:
             self.test_subset = args.test_subset if args.test_subset != "" else None
             self.test_cohort = args.test_cohort
             if self.test_cohort is not None:
+                # make patient_id to be {patient_id}_{cohort_number} to prevent duplicated ids
                 if os.path.isdir(self.test_cohort):
                     test_cohort = pl.read_parquet(os.path.join(self.test_cohort, "*.parquet"))
                 else:
@@ -141,10 +142,17 @@ class Trainer:
 
         model = self.architecture(self.args)
         if self.args.pretrained and not self.args.no_pretrained_checkpoint:
-            pretrained_path = os.path.join(
-                self.args.save_dir, self.args.pretrained, "checkpoint_best.pt"
+            if self.args.src_data == "meds":
+                pretrained_path = os.path.join(self.args.pretrained, "checkpoint_best.pt")
+            else:
+                pretrained_path = os.path.join(
+                    self.args.save_dir, self.args.pretrained, "checkpoint_best.pt"
+                )
+            logger.info(
+                f"Loading checkpoint from {pretrained_path}."
             )
             model = load_model(pretrained_path, model)
+            logger.info("Successfully loaded the checkpoint.")
 
         if self.args.enable_fsdp:
             model = self.accelerator.prepare(model)
@@ -207,6 +215,11 @@ class Trainer:
             self.args.exp_name,
             "checkpoint_best.pt",
         )
+        last_model_path = os.path.join(
+            self.args.save_dir,
+            self.args.exp_name,
+            "checkpoint_last.pt",
+        )
         if self.valid_loader is None:
             logger.info("No validation set found, save the last checkpoint.")
             state_dict = self.accelerator.unwrap_model(self.model).state_dict()
@@ -214,10 +227,14 @@ class Trainer:
             return False
 
         metric_dict = self.epoch(self.valid_subset, self.valid_loader, n_epoch)
+        state_dict = self.accelerator.unwrap_model(self.model).state_dict()
         if self.early_stopping(metric_dict[self.metric.update_target]):
-            state_dict = self.accelerator.unwrap_model(self.model).state_dict()
             logger.info("Save the best checkpoint.", main_process_only=True)
             self.accelerator.save(state_dict, best_model_path)
+        else:
+            logger.info("Save the last checkpoint.", main_process_only=True)
+            self.accelerator.save(state_dict, last_model_path)
+
         return self.early_stopping.early_stop
 
     def test(self):
@@ -249,6 +266,10 @@ class Trainer:
 
         if self.args.src_data == "meds" and self.args.test_cohort is not None:
             if self.accelerator.num_processes == 1:
+                # roll back {patient_id}_{cohort_number} to {patient_id}
+                self.test_cohort = self.test_cohort.with_columns(
+                    pl.col("patient_id").map_elements(lambda x: x.split("_")[0]).cast(int)
+                )
                 self.test_cohort.write_parquet(
                     os.path.join(self.args.save_dir, self.args.exp_name, f"{self.test_subset}.parquet")
                 )
@@ -298,7 +319,7 @@ class Trainer:
                     self.scheduler.step()
                 self.metric(logging_outputs, accelerator)
                 if (
-                    not self.args.debug
+                    self.log is not None
                     and self.accelerator.is_main_process
                     and self.args.log_loss
                 ):
@@ -306,7 +327,7 @@ class Trainer:
                 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
-        if self.args.debug:
+        if self.log is None:
             print(log_dict)
         else:
             self.accelerator.log(log_dict)
@@ -479,19 +500,16 @@ class Trainer:
                 f.create_group("ehr")
                 encoded = f["ehr"]
 
-                data = h5py.File(os.path.join(self.data, split + ".h5"))["ehr"]
-                patient_ids = data.keys()
-
-                for k in patient_ids:
-                    k = str(k)
-                    stay_g = encoded.create_group(k)
+                for patient_id, metadata in dataloader.dataset.manifest.iterrows():
+                    stay_g = encoded.create_group(patient_id)
                     stay_g.create_dataset(
-                        "encoded",
-                        shape=(len(data[k]["time"]), self.args.pred_dim),
-                        dtype="i2",
-                        compression="lzf",
-                        shuffle=True,
-                        chunks=(len(data[k]["time"]), self.args.pred_dim),
+                        "time",
+                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id]["time"][()],
+                        dtype="i"
+                    )
+                    stay_g.create_dataset(
+                        "label",
+                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id]["label"][()],
                     )
                 self.accelerator.wait_for_everyone()
 
@@ -499,6 +517,7 @@ class Trainer:
                     loader = enumerate(dataloader)
                     if self.accelerator.is_main_process:
                         loader = tqdm(loader, total=len(dataloader))
+                    buffer = {}
                     for i, batch in loader:
                         self.step = i
                         all_codes_embs = self.model.input2emb_model(**batch)
@@ -509,34 +528,36 @@ class Trainer:
                         reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
                         patient_ids = batch["patient_id"].reshape(-1)
                         indices = batch["index"].reshape(-1)
-                        labels = batch["label"]
-                        # assume it has only one key (expected "meds_single_task")
-                        key = next(iter(labels.keys()))
-                        for repr, patient_id, index, label in zip(
-                            reprs, patient_ids, indices, labels[key]
-                        ):
-                            if "label" not in encoded[str(patient_id)]:
-                                label = label.int().item()
-                                encoded[str(patient_id)].create_dataset("label", data=label)
-
+                        for repr, patient_id, index, in zip(reprs, patient_ids, indices):
                             start = self.args.max_seq_len * index
                             end = start + self.args.max_seq_len
-                            max_len = encoded[str(patient_id)]["encoded"].shape[0]
+                            max_len = dataloader.dataset.manifest.loc[patient_id]["num_events"]
                             if end > max_len:
                                 repr = repr[: max_len - start, :]
                                 end = max_len
-                            encoded[str(patient_id)]["encoded"][start:end, :] = repr
+                            if patient_id not in buffer:
+                                buffer[patient_id] = []
+                            heapq.heappush(buffer[patient_id], (index, repr))
+                        if ((i + 1) % 100 == 0) or ((i + 1) == len(loader)):
+                            # flush buffer if applicable
+                            for patient_id in list(buffer.keys()):
+                                items = buffer[patient_id]
+                                metadata = dataloader.dataset.manifest.loc[patient_id]
+                                if len(items) == metadata["num_samples"]:
+                                    data = np.concatenate([x[1] for x in items])
+                                    encoded[patient_id].create_dataset(
+                                        "encoded",
+                                        data=data,
+                                        dtype="i2",
+                                        compression="lzf",
+                                        shuffle=True,
+                                        chunks=(metadata["num_events"], self.args.pred_dim)
+                                    )
+                                    del buffer[patient_id]
 
             self.accelerator.wait_for_everyone()
             if self.accelerator.num_processes == 1:
                 os.rename(hdf5_path, _get_hdf5_path(-1))
-                main_file = File(_get_hdf5_path(-1), "r+")
-                for k in tqdm(data.keys()):
-                    main_file["ehr"][k].create_dataset(
-                        "time", data=data[k]["time"][()]
-                    )
-                    main_file["ehr"][k].attrs.update(data[k].attrs)
-                main_file.close()
             else:
                 if self.accelerator.is_main_process:
                     main_file = File(_get_hdf5_path(-1), "w")
@@ -545,7 +566,7 @@ class Trainer:
                         File(_get_hdf5_path(i), "r")
                         for i in range(self.accelerator.num_processes)
                     ]
-                    for k in tqdm(data.keys()):
+                    for k in tqdm(dataloader.dataset.manifest.index):
                         # Chunkwise sum, but may be duplicated chunks
                         encodeds = (
                             np.stack([f["ehr"][k]["encoded"][()] for f in files], axis=0)
@@ -562,11 +583,6 @@ class Trainer:
                             shuffle=True,
                             chunks=encodeds.shape,
                         )
-                        main_file["ehr"][k].create_dataset(
-                            "time", data=data[k]["time"][()]
-                        )
-                        main_file["ehr"][k].attrs.update(data[k].attrs)
-
                     for f in files:
                         f.close()
                     main_file.close()
