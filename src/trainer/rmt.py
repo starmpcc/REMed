@@ -177,15 +177,11 @@ class RMTTrainer(Trainer):
                     self.optimizer.step()
                     self.scheduler.step()
                 self.metric(logging_outputs, accelerator)
-                if (
-                    not self.args.debug
-                    and self.accelerator.is_main_process
-                    and self.args.log_loss
-                ):
+                if self.log and self.accelerator.is_main_process and self.args.log_loss:
                     self.accelerator.log({f"{split}_loss": loss})
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
-        if self.args.debug:
+        if not self.log:
             print(log_dict)
         else:
             self.accelerator.log(log_dict)
@@ -205,6 +201,7 @@ class FlattenRMTTrainer(RMTTrainer):
         self.data_path = os.path.join(
             args.input_path, f"{args.pred_time}h", f"{args.src_data}.h5"
         )
+
 
 @register_trainer("cached_rmt")
 class CachedRMTTrainer(RMTTrainer):
