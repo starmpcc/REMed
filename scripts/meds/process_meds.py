@@ -1,24 +1,23 @@
+import functools
+import glob
+import math
+import multiprocessing
 import os
 import re
-import math
 import shutil
-import glob
 import time
-import functools
-from pathlib import Path
 from argparse import ArgumentParser
+from bisect import bisect_left, bisect_right
 from datetime import datetime
+from pathlib import Path
 
 import h5py
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
-from bisect import bisect_left, bisect_right
-
-import multiprocessing
 from tqdm import tqdm
-
 from transformers import AutoTokenizer
+
 
 def find_boundary_between(tuples_list, start, end):
     starts = [s for s, e in tuples_list]
@@ -30,52 +29,53 @@ def find_boundary_between(tuples_list, start, end):
 
     return start_index, end_index
 
+
 def get_parser():
     parser = ArgumentParser()
     parser.add_argument(
         "root",
         help="path to MEDS dataset. it can be either of directory or the exact file path "
-            "with the file extension. if provided with directory, it tries to scan *.csv or "
-            "*.parquet files contained in the directory, including sub-directories, to process "
-            "all of them."
+        "with the file extension. if provided with directory, it tries to scan *.csv or "
+        "*.parquet files contained in the directory, including sub-directories, to process "
+        "all of them.",
     )
     parser.add_argument(
         "--metadata_dir",
-        help="path to metadata directory for the input MEDS dataset, which contains codes.parquet"
+        help="path to metadata directory for the input MEDS dataset, which contains codes.parquet",
     )
 
     parser.add_argument(
         "--cohort",
         type=str,
         help="path to the defined cohort, which must be a result of ACES. it can be either of "
-            "directory or the exact file path that has the same extension with the MEDS dataset "
-            "to be processed. the file structure of this cohort directory should be the same with "
-            "the provided MEDS dataset directory to match each cohort to its corresponding shard "
-            "data."
+        "directory or the exact file path that has the same extension with the MEDS dataset "
+        "to be processed. the file structure of this cohort directory should be the same with "
+        "the provided MEDS dataset directory to match each cohort to its corresponding shard "
+        "data.",
     )
     parser.add_argument(
         "--cohort_label_name",
         type=str,
         default="boolean_value",
-        help="column name in the cohort dataframe to be used for label"
+        help="column name in the cohort dataframe to be used for label",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="outputs",
-        help="directory to save processed outputs."
+        help="directory to save processed outputs.",
     )
     parser.add_argument(
         "--rebase",
         action="store_true",
-        help="whether or not to rebase the output directory if exists."
+        help="whether or not to rebase the output directory if exists.",
     )
     parser.add_argument(
         "--workers",
         metavar="N",
         default=1,
         type=int,
-        help="number of parallel workers."
+        help="number of parallel workers.",
     )
 
     # NOTE this will be omitted in the future when the related issue is solved
@@ -83,10 +83,11 @@ def get_parser():
     parser.add_argument(
         "--mimic_dir",
         help="path to directory for MIMIC-IV database where it contains hosp/ and icu/ as a"
-            "subdirectory."
+        "subdirectory.",
     )
 
     return parser
+
 
 def main(args):
     root_path = Path(args.root)
@@ -101,7 +102,7 @@ def main(args):
             shutil.rmtree(output_dir)
         if output_dir.exists():
             raise ValueError(
-                f"File exists: \'{str(output_dir.resolve())}\'. If you want to rebase the "
+                f"File exists: '{str(output_dir.resolve())}'. If you want to rebase the "
                 "directory, please run the script with --rebase."
             )
         output_dir.mkdir()
@@ -119,7 +120,7 @@ def main(args):
 
     label_col_name = args.cohort_label_name
 
-    tokenizer = AutoTokenizer.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
+    tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
 
     codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
     codes_metadata = codes_metadata.set_index("code")["description"].to_dict()
@@ -147,17 +148,20 @@ def main(args):
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
 
         # do not allow to use static events or birth event
-        birth_code = "MEDS_BIRTH" # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
+        birth_code = (
+            "MEDS_BIRTH"  # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
+        )
         if birth_code not in codes_metadata:
             print(
-                f"\"{birth_code}\" is not found in the codes metadata, which may lead to "
+                f'"{birth_code}" is not found in the codes metadata, which may lead to '
                 "unexpected results since we currently exclude this event from the input data. "
             )
 
         data = data.with_columns(
             pl.when(pl.col("code") == birth_code)
             .then(None)
-            .otherwise(pl.col("time")).alias("time")
+            .otherwise(pl.col("time"))
+            .alias("time")
         )
         data = data.drop_nulls(subset=["patient_id", "time"])
 
@@ -173,20 +177,25 @@ def main(args):
         cohort = cohort.drop_nulls(label_col_name)
 
         cohort = cohort.select(
-            [pl.col("patient_id"),
+            [
+                pl.col("patient_id"),
                 pl.col(label_col_name),
                 # pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
-                pl.col("prediction_time").alias("endtime")]
+                pl.col("prediction_time").alias("endtime"),
+            ]
         )
-        cohort = cohort.group_by(
-            "patient_id", maintain_order=True
-        ).agg(pl.col(["endtime", label_col_name])).collect() # omitted "starttime"
+        cohort = (
+            cohort.group_by("patient_id", maintain_order=True)
+            .agg(pl.col(["endtime", label_col_name]))
+            .collect()
+        )  # omitted "starttime"
         cohort_dict = {
             x["patient_id"]: {
                 # "starttime": x["starttime"],
                 "endtime": x["endtime"],
                 "label": x[label_col_name],
-            } for x in cohort.iter_rows(named=True)
+            }
+            for x in cohort.iter_rows(named=True)
         }
 
         def extract_cohort(row):
@@ -221,22 +230,33 @@ def main(args):
                 return {"cohort_end": None, "cohort_label": None}
 
         data = data.group_by(["patient_id", "time"], maintain_order=True).agg(pl.all())
-        data = data.with_columns(
-            pl.struct(["patient_id", "time"])
-            .map_elements(
-                extract_cohort,
-                return_dtype=pl.Struct(
-                    {"cohort_end": pl.List(pl.Datetime()), "cohort_label": pl.List(pl.Boolean)}
+        data = (
+            data.with_columns(
+                pl.struct(["patient_id", "time"])
+                .map_elements(
+                    extract_cohort,
+                    return_dtype=pl.Struct(
+                        {
+                            "cohort_end": pl.List(pl.Datetime()),
+                            "cohort_label": pl.List(pl.Boolean),
+                        }
+                    ),
                 )
+                .alias("cohort_criteria")
             )
-            .alias("cohort_criteria")
-        ).unnest("cohort_criteria").collect()
+            .unnest("cohort_criteria")
+            .collect()
+        )
 
         data = data.drop_nulls("cohort_label")
 
-        data = data.with_columns(pl.col("time").dt.strftime("%Y-%m-%d %H:%M:%S").cast(pl.List(str)))
         data = data.with_columns(
-            pl.col("time").list.sample(n=pl.col("code").list.len(), with_replacement=True)
+            pl.col("time").dt.strftime("%Y-%m-%d %H:%M:%S").cast(pl.List(str))
+        )
+        data = data.with_columns(
+            pl.col("time").list.sample(
+                n=pl.col("code").list.len(), with_replacement=True
+            )
         )
 
         if str(subdir) != ".":
@@ -252,7 +272,12 @@ def main(args):
                 manifest_f.write("patient_id\tnum_events\tshard_id\n")
 
             must_have_columns = [
-                "patient_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
+                "patient_id",
+                "cohort_end",
+                "cohort_label",
+                "time",
+                "code",
+                "numeric_value",
             ]
             rest_of_columns = [x for x in data.columns if x not in must_have_columns]
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
@@ -269,7 +294,7 @@ def main(args):
                 # NOTE this will be omitted in the future when the related issue is solved
                 # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
                 d_items,
-                d_labitems
+                d_labitems,
             )
 
             # meds --> remed
@@ -283,12 +308,16 @@ def main(args):
                 data_chunks = []
                 for i in range(0, len(patient_ids), chunksize):
                     data_chunks.append(
-                        data.filter(pl.col("patient_id").is_in(patient_ids[i:i+chunksize]))
+                        data.filter(
+                            pl.col("patient_id").is_in(patient_ids[i : i + chunksize])
+                        )
                     )
                 del data
                 pool = multiprocessing.get_context("spawn").Pool(processes=args.workers)
                 # the order is preserved
-                length_per_subject_gathered = pool.map(meds_to_remed_partial, data_chunks)
+                length_per_subject_gathered = pool.map(
+                    meds_to_remed_partial, data_chunks
+                )
                 del data_chunks
 
             if len(length_per_subject_gathered) != args.workers:
@@ -302,6 +331,7 @@ def main(args):
                 for subject_id, (length, shard_id) in length_per_subject.items():
                     manifest_f.write(f"{subject_id}\t{length}\t{shard_id}\n")
 
+
 def meds_to_remed(
     tokenizer,
     rest_of_columns,
@@ -314,7 +344,7 @@ def meds_to_remed(
     # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
     d_items,
     d_labitems,
-    df_chunk
+    df_chunk,
 ):
     code_matching_pattern = re.compile(r"\d+")
 
@@ -337,8 +367,12 @@ def meds_to_remed(
                         # will be omitted in the future when it is solved
                         event_type = col_event.split("//")[0]
                         if event_type in [
-                            "LAB", "PROCEDURE", "PATIENT_FLUID_OUTPUT", "INFUSION_START",
-                            "INFUSION_END", "DIAGNOSIS"
+                            "LAB",
+                            "PROCEDURE",
+                            "PATIENT_FLUID_OUTPUT",
+                            "INFUSION_START",
+                            "INFUSION_END",
+                            "DIAGNOSIS",
                         ]:
                             items = col_event.split("//")
                             # for icd codes
@@ -348,7 +382,8 @@ def meds_to_remed(
                             # for item codes
                             else:
                                 code_idx = [
-                                    bool(code_matching_pattern.fullmatch(item)) for item in items
+                                    bool(code_matching_pattern.fullmatch(item))
+                                    for item in items
                                 ].index(True)
                                 code = items[code_idx]
 
@@ -365,28 +400,35 @@ def meds_to_remed(
                                     desc = d_labitems[code]
                                 else:
                                     do_break = True
-                                
+
                                 if not do_break:
                                     items[code_idx] = desc
                                     col_event = "//".join(items)
                     elif not "id" in col_name:
                         col_event = re.sub(
-                            r"\d*\.\d+", lambda x: str(round(float(x.group(0)), 4)),
-                            col_event
+                            r"\d*\.\d+",
+                            lambda x: str(round(float(x.group(0)), 4)),
+                            col_event,
                         )
                         event_offset = len(event) + len(col_name) + 1
                         digit_offset_tmp = [
-                            g.span() for g in re.finditer(
+                            g.span()
+                            for g in re.finditer(
                                 r"([0-9]+([.][0-9]*)?|[0-9]+|\.+)", col_event
                             )
                         ]
 
                         internal_offset = 0
                         for start, end in digit_offset_tmp:
-                            digit_offset.append((
-                                event_offset + start + internal_offset,
-                                event_offset + end + (end - start) * 2 + internal_offset
-                            ))
+                            digit_offset.append(
+                                (
+                                    event_offset + start + internal_offset,
+                                    event_offset
+                                    + end
+                                    + (end - start) * 2
+                                    + internal_offset,
+                                )
+                            )
                             internal_offset += (end - start) * 2
 
                         col_event = re.sub(r"([0-9\.])", r" \1 ", col_event)
@@ -407,7 +449,7 @@ def meds_to_remed(
             return_tensors="np",
             return_token_type_ids=False,
             return_attention_mask=True,
-            return_offsets_mapping=True
+            return_offsets_mapping=True,
         )
         lengths_before_padding = tokenized_events["attention_mask"].sum(axis=1)
 
@@ -416,7 +458,9 @@ def meds_to_remed(
         for i, digit_offset in enumerate(digit_offsets):
             for start, end in digit_offset:
                 start_index, end_index = find_boundary_between(
-                    tokenized_events[i].offsets[:lengths_before_padding[i]-1], start, end
+                    tokenized_events[i].offsets[: lengths_before_padding[i] - 1],
+                    start,
+                    end,
                 )
 
                 # define dpe ids for digits found
@@ -427,13 +471,19 @@ def meds_to_remed(
                 # integer without decimal point
                 # e.g., for "1 2 3 4 5", assign [10, 9, 8, 7, 6]
                 if num_decimal_points == 0:
-                    dpe_ids[i][start_index:end_index] = list(range(num_digits + 5, 5, -1))
+                    dpe_ids[i][start_index:end_index] = list(
+                        range(num_digits + 5, 5, -1)
+                    )
                 # floats
                 # e.g., for "1 2 3 4 5 . 6 7 8 9", assign [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
                 elif num_decimal_points == 1:
-                    num_decimals = num_digits - np.where(
-                        input_ids[i][start_index:end_index] == 119 # 119: token id for "."
-                    )[0][0]
+                    num_decimals = (
+                        num_digits
+                        - np.where(
+                            input_ids[i][start_index:end_index]
+                            == 119  # 119: token id for "."
+                        )[0][0]
+                    )
                     dpe_ids[i][start_index:end_index] = list(
                         range(num_digits + 5 - num_decimals, 5 - num_decimals, -1)
                     )
@@ -446,14 +496,16 @@ def meds_to_remed(
         # for CLS tokens: 5
         # for SEP tokens: 6
         type_ids = np.zeros(input_ids.shape, dtype=int)
-        type_ids[:, 0] = 5 # CLS tokens
+        type_ids[:, 0] = 5  # CLS tokens
         for i, col_name_offset in enumerate(col_name_offsets):
-            type_ids[i][lengths_before_padding[i]-1] = 6 # SEP tokens
+            type_ids[i][lengths_before_padding[i] - 1] = 6  # SEP tokens
             # fill with type ids for column values
-            type_ids[i][1:lengths_before_padding[i]-1] = 3
+            type_ids[i][1 : lengths_before_padding[i] - 1] = 3
             for start, end in col_name_offset:
                 start_index, end_index = find_boundary_between(
-                    tokenized_events[i].offsets[1:lengths_before_padding[i]-1], start, end
+                    tokenized_events[i].offsets[1 : lengths_before_padding[i] - 1],
+                    start,
+                    end,
                 )
                 # the first offset is always (0, 0) for CLS token, so we adjust it
                 start_index += 1
@@ -469,7 +521,7 @@ def meds_to_remed(
         worker_id = 0
     else:
         # worker_id is incremental for every generated pool, so divide with num_shards
-        worker_id = (int(worker_id) - 1) % num_shards # 1-based -> 0-based indexing
+        worker_id = (int(worker_id) - 1) % num_shards  # 1-based -> 0-based indexing
     if worker_id == 0:
         progress_bar = tqdm(df_chunk.iter_rows(), total=len(df_chunk))
         progress_bar.set_description(f"Processing from worker-{worker_id}:")
@@ -485,19 +537,18 @@ def meds_to_remed(
         "data_index",
         map(
             lambda x: [data_index_offset[x] + y for y in range(data_length[x])],
-            range(len(data_length))
-        )
+            range(len(data_length)),
+        ),
     )
     events_data = np.concatenate(events_data)
 
-    df_chunk = df_chunk.select(
-        ["patient_id", "cohort_end", "cohort_label", "time"]
-    )
+    df_chunk = df_chunk.select(["patient_id", "cohort_end", "cohort_label", "time"])
     df_chunk = df_chunk.insert_column(4, data_index)
     df_chunk = df_chunk.explode(["cohort_end", "cohort_label"])
     df_chunk = df_chunk.group_by(
         # ["patient_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
-        ["patient_id", "cohort_end", "cohort_label"], maintain_order=True
+        ["patient_id", "cohort_end", "cohort_label"],
+        maintain_order=True,
     ).agg(pl.all())
 
     # regard {patient_id} as {cohort_id}: {patient_id}_{cohort_number}
@@ -505,7 +556,9 @@ def meds_to_remed(
         pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
     )
     df_chunk = df_chunk.with_columns(
-        (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
+        (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias(
+            "patient_id"
+        )
     )
     # data = data.drop("suffix", "cohort_start", "cohort_end")
     df_chunk = df_chunk.drop("suffix", "cohort_end")
@@ -514,11 +567,13 @@ def meds_to_remed(
     progress_bar = tqdm(
         df_chunk.iter_rows(),
         total=len(df_chunk),
-        desc=f"Writing data from worker-{worker_id}:"
+        desc=f"Writing data from worker-{worker_id}:",
     )
 
     for sample in progress_bar:
-        with h5py.File(str(output_dir / output_name / (output_name + f"_{worker_id}.h5")), "a") as f:
+        with h5py.File(
+            str(output_dir / output_name / (output_name + f"_{worker_id}.h5")), "a"
+        ) as f:
             if "ehr" in f:
                 result = f["ehr"]
             else:
@@ -545,6 +600,7 @@ def meds_to_remed(
     del df_chunk
 
     return length_per_subject
+
 
 if __name__ == "__main__":
     parser = get_parser()

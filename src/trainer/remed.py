@@ -6,7 +6,7 @@ import polars as pl
 import torch
 from tqdm import tqdm
 
-from ..dataset import ReprDataset, MEDSReprDataset
+from ..dataset import MEDSReprDataset, ReprDataset
 from ..models import REMed
 from ..utils.trainer_utils import PredLoss, PredMetric, get_max_seq_len, log_from_dict
 from . import register_trainer
@@ -52,7 +52,7 @@ class REMedTrainer(Trainer):
             self.metric(logging_outputs, accelerator)
             if self.log and self.accelerator.is_main_process and self.args.log_loss:
                 self.accelerator.log({f"{split}_loss": loss})
-            
+
             return net_output, logging_outputs
 
         if split == self.train_subset:
@@ -75,11 +75,13 @@ class REMedTrainer(Trainer):
             ):
                 if self.accelerator.num_processes == 1:
                     # check if test cohort is valid
-                    assert set(data_loader.dataset.keys) == set(self.test_cohort["patient_id"]), (
-                        "a set of patient ids in the test cohort should equal to that in the test dataset"
-                    )
+                    assert set(data_loader.dataset.keys) == set(
+                        self.test_cohort["patient_id"]
+                    ), "a set of patient ids in the test cohort should equal to that in the test dataset"
                     predicted_cohort = {
-                        "patient_id": [], "predicted_label": [], "predicted_prob": []
+                        "patient_id": [],
+                        "predicted_label": [],
+                        "predicted_prob": [],
                     }
                     do_output_cohort = True
                 else:
@@ -101,15 +103,19 @@ class REMedTrainer(Trainer):
                 if do_output_cohort:
                     predicted_cohort["patient_id"].extend(sample["patient_id"].tolist())
                     predicted_cohort["predicted_label"].extend(
-                        (net_output["pred"]["meds_single_task"].view(-1) > 0.5).int().tolist()
+                        (net_output["pred"]["meds_single_task"].view(-1) > 0.5)
+                        .int()
+                        .tolist()
                     )
                     predicted_cohort["predicted_prob"].extend(
-                        net_output['pred']['meds_single_task'].view(-1).tolist()
+                        net_output["pred"]["meds_single_task"].view(-1).tolist()
                     )
 
         if do_output_cohort:
             predicted_cohort = pl.DataFrame(predicted_cohort)
-            self.test_cohort = self.test_cohort.join(predicted_cohort, on="patient_id", how="left")
+            self.test_cohort = self.test_cohort.join(
+                predicted_cohort, on="patient_id", how="left"
+            )
 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)

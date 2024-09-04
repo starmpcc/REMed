@@ -1,7 +1,7 @@
+import heapq
 import logging
 import os
 import uuid
-import heapq
 from contextlib import nullcontext
 from shutil import rmtree
 
@@ -26,7 +26,7 @@ class Trainer:
         self.args = args
         set_seed(self.args.seed)
         if self.args.src_data == "meds":
-            self.df = None # do not need this for meds dataset
+            self.df = None  # do not need this for meds dataset
             self.train_subset = args.train_subset if args.train_subset != "" else None
             self.valid_subset = args.valid_subset if args.valid_subset != "" else None
             self.test_subset = args.test_subset if args.test_subset != "" else None
@@ -34,14 +34,20 @@ class Trainer:
             if self.test_cohort is not None:
                 # make patient_id to be {patient_id}_{cohort_number} to prevent duplicated ids
                 if os.path.isdir(self.test_cohort):
-                    test_cohort = pl.read_parquet(os.path.join(self.test_cohort, "*.parquet"))
+                    test_cohort = pl.read_parquet(
+                        os.path.join(self.test_cohort, "*.parquet")
+                    )
                 else:
                     test_cohort = pl.read_parquet(self.test_cohort)
                 test_cohort = test_cohort.with_columns(
                     pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
                 )
                 test_cohort = test_cohort.with_columns(
-                    (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
+                    (
+                        pl.col("patient_id").cast(str)
+                        + "_"
+                        + pl.col("suffix").cast(str)
+                    ).alias("patient_id")
                 )
                 test_cohort = test_cohort.drop("suffix")
                 self.test_cohort = test_cohort
@@ -90,7 +96,9 @@ class Trainer:
         self.args.exp_name = "".join([chr(int(i)) for i in exp_encoded])
 
         if not self.args.encode_only:
-            os.makedirs(os.path.join(self.args.save_dir, self.args.exp_name), exist_ok=True)
+            os.makedirs(
+                os.path.join(self.args.save_dir, self.args.exp_name), exist_ok=True
+            )
         logging.basicConfig(
             format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
             datefmt="%m/%d/%Y %H:%M:%S",
@@ -99,7 +107,7 @@ class Trainer:
         logger.info(f"exp_name: {self.args.exp_name}", main_process_only=True)
 
         if self.args.src_data == "meds":
-            self.data = self.data_path # meds dataset needs data path, not data itself
+            self.data = self.data_path  # meds dataset needs data path, not data itself
         else:
             self.data = File(self.data_path, "r")
 
@@ -143,14 +151,14 @@ class Trainer:
         model = self.architecture(self.args)
         if self.args.pretrained and not self.args.no_pretrained_checkpoint:
             if self.args.src_data == "meds":
-                pretrained_path = os.path.join(self.args.pretrained, "checkpoint_best.pt")
+                pretrained_path = os.path.join(
+                    self.args.pretrained, "checkpoint_best.pt"
+                )
             else:
                 pretrained_path = os.path.join(
                     self.args.save_dir, self.args.pretrained, "checkpoint_best.pt"
                 )
-            logger.info(
-                f"Loading checkpoint from {pretrained_path}."
-            )
+            logger.info(f"Loading checkpoint from {pretrained_path}.")
             model = load_model(pretrained_path, model)
             logger.info("Successfully loaded the checkpoint.")
 
@@ -268,10 +276,16 @@ class Trainer:
             if self.accelerator.num_processes == 1:
                 # roll back {patient_id}_{cohort_number} to {patient_id}
                 self.test_cohort = self.test_cohort.with_columns(
-                    pl.col("patient_id").map_elements(lambda x: x.split("_")[0]).cast(int)
+                    pl.col("patient_id")
+                    .map_elements(lambda x: x.split("_")[0])
+                    .cast(int)
                 )
                 self.test_cohort.write_parquet(
-                    os.path.join(self.args.save_dir, self.args.exp_name, f"{self.test_subset}.parquet")
+                    os.path.join(
+                        self.args.save_dir,
+                        self.args.exp_name,
+                        f"{self.test_subset}.parquet",
+                    )
                 )
             else:
                 logger.warning(
@@ -324,7 +338,7 @@ class Trainer:
                     and self.args.log_loss
                 ):
                     self.accelerator.log({f"{split}_loss": loss})
-                
+
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
         if self.log is None:
@@ -504,12 +518,16 @@ class Trainer:
                     stay_g = encoded.create_group(patient_id)
                     stay_g.create_dataset(
                         "time",
-                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id]["time"][()],
-                        dtype="i"
+                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id][
+                            "time"
+                        ][()],
+                        dtype="i",
                     )
                     stay_g.create_dataset(
                         "label",
-                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id]["label"][()],
+                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id][
+                            "label"
+                        ][()],
                     )
                 self.accelerator.wait_for_everyone()
 
@@ -528,10 +546,16 @@ class Trainer:
                         reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
                         patient_ids = batch["patient_id"].reshape(-1)
                         indices = batch["index"].reshape(-1)
-                        for repr, patient_id, index, in zip(reprs, patient_ids, indices):
+                        for (
+                            repr,
+                            patient_id,
+                            index,
+                        ) in zip(reprs, patient_ids, indices):
                             start = self.args.max_seq_len * index
                             end = start + self.args.max_seq_len
-                            max_len = dataloader.dataset.manifest.loc[patient_id]["num_events"]
+                            max_len = dataloader.dataset.manifest.loc[patient_id][
+                                "num_events"
+                            ]
                             if end > max_len:
                                 repr = repr[: max_len - start, :]
                                 end = max_len
@@ -551,7 +575,10 @@ class Trainer:
                                         dtype="i2",
                                         compression="lzf",
                                         shuffle=True,
-                                        chunks=(metadata["num_events"], self.args.pred_dim)
+                                        chunks=(
+                                            metadata["num_events"],
+                                            self.args.pred_dim,
+                                        ),
                                     )
                                     del buffer[patient_id]
 
@@ -569,7 +596,9 @@ class Trainer:
                     for k in tqdm(dataloader.dataset.manifest.index):
                         # Chunkwise sum, but may be duplicated chunks
                         encodeds = (
-                            np.stack([f["ehr"][k]["encoded"][()] for f in files], axis=0)
+                            np.stack(
+                                [f["ehr"][k]["encoded"][()] for f in files], axis=0
+                            )
                             .astype(np.uint16)
                             .max(axis=0)
                             .astype(np.int16)

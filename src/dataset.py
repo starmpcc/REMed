@@ -1,8 +1,8 @@
-import os
 import math
+import os
 import random
-import h5pickle
 
+import h5pickle
 import numpy as np
 import pandas as pd
 import torch
@@ -147,6 +147,7 @@ class EHRDataset(BaseDataset):
             "label": labels,
         }
 
+
 class EHRforReprGen(BaseDataset):
     # To make Event Reprs (see `encode_events.py`)
     def __init__(self, args, split=None, data=None, df=None):
@@ -182,6 +183,7 @@ class EHRforReprGen(BaseDataset):
             "index": torch.IntTensor([sample_idx]),
         }
 
+
 class ReprDataset(BaseDataset):
     def __init__(self, args, split, data, df):
         super().__init__(args, split, data, df)
@@ -206,6 +208,7 @@ class ReprDataset(BaseDataset):
             "label": self.get_labels(data),
         }
 
+
 class MEDSDataset(Dataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
         super().__init__()
@@ -221,9 +224,9 @@ class MEDSDataset(Dataset):
         unique_shard_ids = self.manifest["shard_id"].unique()
         self.data = {}
         for shard_id in unique_shard_ids:
-            self.data[shard_id] = (
-                h5pickle.File(os.path.join(data_path, split, split + f"_{shard_id}.h5"))["ehr"]
-            )
+            self.data[shard_id] = h5pickle.File(
+                os.path.join(data_path, split, split + f"_{shard_id}.h5")
+            )["ehr"]
 
     def __len__(self):
         return len(self.manifest)
@@ -244,7 +247,7 @@ class MEDSDataset(Dataset):
                 ret[k]["meds_single_task"] = torch.FloatTensor(
                     torch.stack([s["label"] for s in samples])
                 )
-            elif k in ["patient_id", "index"]: # for MEDSForReprGen
+            elif k in ["patient_id", "index"]:  # for MEDSForReprGen
                 ret[k] = np.array([s[k] for s in samples])
             else:
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
@@ -263,19 +266,18 @@ class MEDSDataset(Dataset):
 
         if self.args.random_sample:
             if self.args.max_seq_len < input.shape[0]:
-                indices = random.sample(
-                    range(0, input.shape[0]), self.args.max_seq_len
-                )
+                indices = random.sample(range(0, input.shape[0]), self.args.max_seq_len)
                 input = input[indices, :, :]
                 times = times[indices]
 
         return {
-            "input_ids": torch.LongTensor(input[:, 0, :][-self.args.max_seq_len:]),
-            "type_ids": torch.LongTensor(input[:, 1, :][-self.args.max_seq_len:]),
-            "dpe_ids": torch.LongTensor(input[:, 2, :][-self.args.max_seq_len:]),
-            "times": torch.IntTensor(times[-self.args.max_seq_len:]),
-            "label": label
+            "input_ids": torch.LongTensor(input[:, 0, :][-self.args.max_seq_len :]),
+            "type_ids": torch.LongTensor(input[:, 1, :][-self.args.max_seq_len :]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :][-self.args.max_seq_len :]),
+            "times": torch.IntTensor(times[-self.args.max_seq_len :]),
+            "label": label,
         }
+
 
 class MEDSForReprGen(MEDSDataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
@@ -290,15 +292,15 @@ class MEDSForReprGen(MEDSDataset):
         return self.manifest["last_sample_index"].max()
 
     def __getitem__(self, idx):
-        patient_index = (
-            self.manifest["last_sample_index"].searchsorted(idx, side="right")
+        patient_index = self.manifest["last_sample_index"].searchsorted(
+            idx, side="right"
         )
         patient_id = self.manifest.index[patient_index]
         shard_id = self.manifest.iloc[patient_index]["shard_id"]
         prev_idx = (
-            0 if patient_index == 0 else (
-                self.manifest["last_sample_index"].iloc[patient_index - 1]
-            )
+            0
+            if patient_index == 0
+            else (self.manifest["last_sample_index"].iloc[patient_index - 1])
         )
         data = self.data[shard_id][str(patient_id)]
 
@@ -314,15 +316,16 @@ class MEDSForReprGen(MEDSDataset):
             "times": torch.IntTensor(data["time"][start:end]),
             "patient_id": patient_id,
             "index": sample_idx_in_patient,
-            "label": label
+            "label": label,
         }
+
 
 class MEDSReprDataset(Dataset):
     def __init__(self, args, split, data_path, *pargs, **kwargs):
         super().__init__()
 
         self.args = args
- 
+
         if not split.endswith("_encoded"):
             split = split + "_encoded"
 
@@ -376,8 +379,9 @@ class MEDSReprDataset(Dataset):
             "repr": repr,
             "times": times,
             "label": label,
-            "patient_id": self.manifest[idx]
+            "patient_id": self.manifest[idx],
         }
+
 
 class FlattenDataset(BaseDataset):
     def __init__(self, args, split, data, df):
