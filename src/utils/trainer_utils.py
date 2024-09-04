@@ -23,7 +23,10 @@ class Task:
 
 
 def get_task(task_name, src_data):
-    if re.findall("mortality|readmission|los", task_name):
+    if task_name == "meds_single_task":
+        # NOTE as of meds 0.3.0, it supports only for binary classification task
+        return Task(task_name, 1, "binary")
+    elif re.findall("mortality|readmission|los", task_name):
         return Task(task_name, 1, "binary")
     elif re.findall("diagnosis", task_name):
         if src_data == "umcdb":

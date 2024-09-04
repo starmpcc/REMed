@@ -32,8 +32,43 @@ def get_parser():
         "--train_type", type=str, default="short", choices=TRAINER_REGISTRY.keys()
     )
     parser.add_argument(
-        "--src_data", type=str, choices=["eicu", "mimiciv", "umcdb", "hirid"], default="mimiciv"
+        "--src_data",
+        type=str,
+        choices=["eicu", "mimiciv", "umcdb", "hirid", "meds"],
+        default="mimiciv"
     )
+    parser.add_argument(
+        "--train_subset",
+        type=str,
+        default="train",
+        help="file name without extension to load data for the training. only used when"
+            "`--src_data` is set to `'meds'`."
+    )
+    parser.add_argument(
+        "--valid_subset",
+        type=str,
+        default="tuning",
+        help="file name without extension to load data for the validation. only used when"
+            "`--src_data` is set to `'meds'`."
+    )
+    parser.add_argument(
+        "--test_subset",
+        type=str,
+        default="held_out",
+        help="file name without extension to load data for the test. only used when `--src_data` "
+            "is set to `'meds'`."
+    )
+    parser.add_argument(
+        "--test_cohort",
+        type=str,
+        default=None,
+        help="path to the test cohort, which must be a result of ACES. it can be either of "
+            "directory or the exact file path that has .parquet file extension. if provided with "
+            "directory, it tries to load `${test_subset}`/*.parquet files in the directory. "
+            "note that the set of patient ids in this cohort should be matched with that in the "
+            "test dataset"
+    )
+
     parser.add_argument(
         "--pred_targets",
         nargs="+",
@@ -65,6 +100,7 @@ def get_parser():
             "sodium_1",
             "sodium_2",
             "sodium_3",
+            "meds_single_task"
         ],
         default=[
             "readmission",
@@ -161,7 +197,8 @@ def get_parser():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log_loss", action="store_true")
     # Wandb
-    parser.add_argument("--wandb_entity_name", type=str, required=True)
+    parser.add_argument("--wandb", action="store_true", help="whether to log using wandb")
+    parser.add_argument("--wandb_entity_name", type=str)
     parser.add_argument("--wandb_project_name", type=str, default="REMed")
     parser.add_argument("--pretrained", type=str, default=None)
     parser.add_argument("--resume_name", type=str, default=None)

@@ -1,6 +1,8 @@
 import math
+import os
 import random
 
+import h5pickle
 import numpy as np
 import pandas as pd
 import torch
@@ -204,6 +206,180 @@ class ReprDataset(BaseDataset):
             "repr": repr,
             "times": _times,
             "label": self.get_labels(data),
+        }
+
+
+class MEDSDataset(Dataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__()
+
+        self.args = args
+        self.padding = "fixed"
+
+        # read and record data manifest if needed
+        self.manifest = pd.read_csv(
+            os.path.join(data_path, split + ".tsv"), delimiter="\t"
+        ).set_index("patient_id")
+
+        unique_shard_ids = self.manifest["shard_id"].unique()
+        self.data = {}
+        for shard_id in unique_shard_ids:
+            self.data[shard_id] = h5pickle.File(
+                os.path.join(data_path, split, split + f"_{shard_id}.h5")
+            )["ehr"]
+
+    def __len__(self):
+        return len(self.manifest)
+
+    def collate_fn(self, samples):
+        ret = dict()
+        max_sample_len = max([s["times"].shape[0] for s in samples])
+        padding_to = min(
+            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
+        )
+
+        for k, v in samples[0].items():
+            if k == "times":
+                padded = pad_sequence([s["times"] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, padding_to - padded.shape[1]))
+            elif k == "label":
+                ret[k] = {}
+                ret[k]["meds_single_task"] = torch.FloatTensor(
+                    torch.stack([s["label"] for s in samples])
+                )
+            elif k in ["patient_id", "index"]:  # for MEDSForReprGen
+                ret[k] = np.array([s[k] for s in samples])
+            else:
+                padded = pad_sequence([s[k] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
+
+        return ret
+
+    def __getitem__(self, idx):
+        patient_id = self.manifest.index[idx]
+        shard_id = self.manifest.iloc[idx]["shard_id"]
+        data = self.data[shard_id][str(patient_id)]
+        input = data["hi"][:]
+        times = data["time"][:]
+        # assume it is a scalar value for a binary classification task
+        label = torch.tensor([data["label"][()]]).float()
+
+        if self.args.random_sample:
+            if self.args.max_seq_len < input.shape[0]:
+                indices = random.sample(range(0, input.shape[0]), self.args.max_seq_len)
+                input = input[indices, :, :]
+                times = times[indices]
+
+        return {
+            "input_ids": torch.LongTensor(input[:, 0, :][-self.args.max_seq_len :]),
+            "type_ids": torch.LongTensor(input[:, 1, :][-self.args.max_seq_len :]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :][-self.args.max_seq_len :]),
+            "times": torch.IntTensor(times[-self.args.max_seq_len :]),
+            "label": label,
+        }
+
+
+class MEDSForReprGen(MEDSDataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__(args, split, data_path, *pargs, **kwargs)
+
+        self.manifest["num_samples"] = self.manifest["num_events"].map(
+            lambda x: math.ceil(x / args.max_seq_len)
+        )
+        self.manifest["last_sample_index"] = np.cumsum(self.manifest["num_samples"])
+
+    def __len__(self):
+        return self.manifest["last_sample_index"].max()
+
+    def __getitem__(self, idx):
+        patient_index = self.manifest["last_sample_index"].searchsorted(
+            idx, side="right"
+        )
+        patient_id = self.manifest.index[patient_index]
+        shard_id = self.manifest.iloc[patient_index]["shard_id"]
+        prev_idx = (
+            0
+            if patient_index == 0
+            else (self.manifest["last_sample_index"].iloc[patient_index - 1])
+        )
+        data = self.data[shard_id][str(patient_id)]
+
+        input = data["hi"]
+        sample_idx_in_patient = idx - prev_idx
+        start = self.args.max_seq_len * sample_idx_in_patient
+        end = self.args.max_seq_len * (sample_idx_in_patient + 1)
+        label = torch.tensor([data["label"][()]]).float()
+        return {
+            "input_ids": torch.LongTensor(input[:, 0, :][start:end]),
+            "type_ids": torch.LongTensor(input[:, 1, :][start:end]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :][start:end]),
+            "times": torch.IntTensor(data["time"][start:end]),
+            "patient_id": patient_id,
+            "index": sample_idx_in_patient,
+            "label": label,
+        }
+
+
+class MEDSReprDataset(Dataset):
+    def __init__(self, args, split, data_path, *pargs, **kwargs):
+        super().__init__()
+
+        self.args = args
+
+        if not split.endswith("_encoded"):
+            split = split + "_encoded"
+
+        self.data = h5pickle.File(os.path.join(data_path, split + ".h5"))["ehr"]
+        self.manifest = list(self.data.keys())
+
+    def __len__(self):
+        return len(self.data)
+
+    def collate_fn(self, samples):
+        ret = dict()
+        max_sample_len = max([s["times"].shape[0] for s in samples])
+        padding_to = min(
+            2 ** math.ceil(math.log(max_sample_len, 2)), self.args.max_seq_len
+        )
+
+        for k, v in samples[0].items():
+            if k == "times":
+                padded = pad_sequence([s["times"] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, padding_to - padded.shape[1]))
+            elif k == "label":
+                ret[k] = {}
+                ret[k]["meds_single_task"] = torch.FloatTensor(
+                    torch.stack([s["label"] for s in samples])
+                )
+            elif k == "patient_id":
+                ret[k] = np.array([s[k] for s in samples])
+            elif k == "repr":
+                padded = pad_sequence([s[k] for s in samples], batch_first=True)
+                ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
+            else:
+                raise ValueError(
+                    f"Invalid key from the output of __getitem__ in {self.__class__}: {k}"
+                )
+
+        return ret
+
+    def __getitem__(self, idx):
+        data = self.data[self.manifest[idx]]
+        encoded = data["encoded"][:]
+        times = data["time"][:]
+
+        encoded = torch.from_numpy(encoded).view(torch.bfloat16).float()
+
+        repr = torch.FloatTensor(encoded)
+        times = torch.IntTensor(times)
+        times = max(times) - times
+        label = torch.tensor([data["label"][()]]).float()
+
+        return {
+            "repr": repr,
+            "times": times,
+            "label": label,
+            "patient_id": self.manifest[idx],
         }
 
 
