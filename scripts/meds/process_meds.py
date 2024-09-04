@@ -139,13 +139,12 @@ def main(args):
 
         data_path = Path(data_path)
         subdir = data_path.relative_to(root_path).parent
-        match data_path.suffix:
-            case ".csv":
-                data = pl.scan_csv(data_path)
-            case ".parquet":
-                data = pl.scan_parquet(data_path)
-            case _:
-                raise ValueError(f"Unsupported file format: {data_path.suffix}")
+        if data_path.suffix == ".csv":
+            data = pl.scan_csv(data_path)
+        elif data_path.suffix == ".parquet":
+            data = pl.scan_parquet(data_path)
+        else:
+            raise ValueError(f"Unsupported file format: {data_path.suffix}")
 
         # do not allow to use static events or birth event
         birth_code = "MEDS_BIRTH" # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
@@ -163,13 +162,13 @@ def main(args):
         data = data.drop_nulls(subset=["patient_id", "time"])
 
         cohort_path = Path(args.cohort) / subdir / data_path.name
-        match cohort_path.suffix:
-            case ".csv":
-                cohort = pl.scan_csv(cohort_path)
-            case ".parquet":
-                cohort = pl.scan_parquet(cohort_path)
-            case _:
-                raise ValueError(f"Unsupported file format: {cohort_path.suffix}")
+
+        if cohort_path.suffix == ".csv":
+            cohort = pl.scan_csv(cohort_path)
+        elif cohort_path.suffix == ".parquet":
+            cohort = pl.scan_parquet(cohort_path)
+        else:
+            raise ValueError(f"Unsupported file format: {cohort_path.suffix}")
 
         cohort = cohort.drop_nulls(label_col_name)
 
