@@ -26,6 +26,10 @@ class Trainer:
         self.args = args
         set_seed(self.args.seed)
         if self.args.src_data == "meds":
+            if self.args.train_type not in ["remed", "short"]:
+                raise NotImplementedError(
+                    "MEDS dataset only supports REMed and Pretraining (short)."
+                )
             self.df = None  # do not need this for meds dataset
             self.train_subset = args.train_subset if args.train_subset != "" else None
             self.valid_subset = args.valid_subset if args.valid_subset != "" else None
