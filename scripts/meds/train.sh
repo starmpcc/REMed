@@ -39,4 +39,5 @@ accelerate launch \
     --train_type remed \
     --lr 1e-5 \
     --scorer \
-    --scorer_use_time
+    --scorer_use_time \
+    --max_seq_len 200000
