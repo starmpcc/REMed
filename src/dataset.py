@@ -369,6 +369,7 @@ class MEDSReprDataset(Dataset):
 
         repr = torch.FloatTensor(encoded)
         times = torch.IntTensor(times)
+        times = max(times) - times
         label = torch.tensor([data["label"][()]]).float()
 
         return {
