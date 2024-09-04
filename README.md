@@ -37,12 +37,10 @@ model(reprs, times) # Return probability between [0,1] (B, 1)
 ```
 
 
-## Reproducing Guide
+## Reproducing Guide (Paper)
 
 > [!NOTE]
-> This reproducing guide contains instructions for processing MIMIC-IV and eICU to reproduce the
-> results reported in the original paper. If you want to process MEDS-formatted dataset, please
-> follow instructions for MEDS in the below section.
+> For the MEDS-formatted dataset, please follow the instructions in the section below.
 
 <details>
 <summary>Requirements</summary>
