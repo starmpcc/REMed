@@ -240,7 +240,6 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         --train_type short \
         --lr 5e-5 \
         --random_sample \
-        --encode_events \
         # if you want to log using wandb
         --wandb \
         --wandb_entity_name $wandb_entity_name \
@@ -306,6 +305,7 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         --lr 1e-5 \
         --scorer \
         --scorer_use_time \
+        --max_seq_len 200000 \
         # if you want to log using wandb
         --wandb \
         --wandb_entity_name $wandb_entity_name \
