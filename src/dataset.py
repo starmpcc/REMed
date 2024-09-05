@@ -216,7 +216,7 @@ class MEDSDataset(Dataset):
         # read and record data manifest if needed
         self.manifest = pd.read_csv(
             os.path.join(data_path, split + ".tsv"), delimiter="\t"
-        ).set_index("patient_id")
+        ).set_index("subject_id")
 
         unique_shard_ids = self.manifest["shard_id"].unique()
         self.data = {}
@@ -244,7 +244,7 @@ class MEDSDataset(Dataset):
                 ret[k]["meds_single_task"] = torch.FloatTensor(
                     torch.stack([s["label"] for s in samples])
                 )
-            elif k in ["patient_id", "index"]: # for MEDSForReprGen
+            elif k in ["subject_id", "index"]: # for MEDSForReprGen
                 ret[k] = np.array([s[k] for s in samples])
             else:
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
@@ -253,27 +253,30 @@ class MEDSDataset(Dataset):
         return ret
 
     def __getitem__(self, idx):
-        patient_id = self.manifest.index[idx]
+        subject_id = self.manifest.index[idx]
         shard_id = self.manifest.iloc[idx]["shard_id"]
-        data = self.data[shard_id][str(patient_id)]
+        data = self.data[shard_id][str(subject_id)]
         input = data["hi"][:]
         times = data["time"][:]
         # assume it is a scalar value for a binary classification task
         label = torch.tensor([data["label"][()]]).float()
 
-        if self.args.random_sample:
-            if self.args.max_seq_len < input.shape[0]:
+        if self.args.max_seq_len < input.shape[0]:
+            if self.args.random_sample:
                 indices = random.sample(
                     range(0, input.shape[0]), self.args.max_seq_len
                 )
                 input = input[indices, :, :]
                 times = times[indices]
+            else:
+                input = input[-self.args.max_seq_len:, :, :]
+                times = times[-self.args.max_seq_len:]
 
         return {
-            "input_ids": torch.LongTensor(input[:, 0, :][-self.args.max_seq_len:]),
-            "type_ids": torch.LongTensor(input[:, 1, :][-self.args.max_seq_len:]),
-            "dpe_ids": torch.LongTensor(input[:, 2, :][-self.args.max_seq_len:]),
-            "times": torch.IntTensor(times[-self.args.max_seq_len:]),
+            "input_ids": torch.LongTensor(input[:, 0, :]),
+            "type_ids": torch.LongTensor(input[:, 1, :]),
+            "dpe_ids": torch.LongTensor(input[:, 2, :]),
+            "times": torch.IntTensor(times),
             "label": label
         }
 
@@ -293,14 +296,14 @@ class MEDSForReprGen(MEDSDataset):
         patient_index = (
             self.manifest["last_sample_index"].searchsorted(idx, side="right")
         )
-        patient_id = self.manifest.index[patient_index]
+        subject_id = self.manifest.index[patient_index]
         shard_id = self.manifest.iloc[patient_index]["shard_id"]
         prev_idx = (
             0 if patient_index == 0 else (
                 self.manifest["last_sample_index"].iloc[patient_index - 1]
             )
         )
-        data = self.data[shard_id][str(patient_id)]
+        data = self.data[shard_id][str(subject_id)]
 
         input = data["hi"]
         sample_idx_in_patient = idx - prev_idx
@@ -312,7 +315,7 @@ class MEDSForReprGen(MEDSDataset):
             "type_ids": torch.LongTensor(input[:, 1, :][start:end]),
             "dpe_ids": torch.LongTensor(input[:, 2, :][start:end]),
             "times": torch.IntTensor(data["time"][start:end]),
-            "patient_id": patient_id,
+            "subject_id": subject_id,
             "index": sample_idx_in_patient,
             "label": label
         }
@@ -348,7 +351,7 @@ class MEDSReprDataset(Dataset):
                 ret[k]["meds_single_task"] = torch.FloatTensor(
                     torch.stack([s["label"] for s in samples])
                 )
-            elif k == "patient_id":
+            elif k == "subject_id":
                 ret[k] = np.array([s[k] for s in samples])
             elif k == "repr":
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
@@ -376,7 +379,7 @@ class MEDSReprDataset(Dataset):
             "repr": repr,
             "times": times,
             "label": label,
-            "patient_id": self.manifest[idx]
+            "subject_id": self.manifest[idx]
         }
 
 class FlattenDataset(BaseDataset):

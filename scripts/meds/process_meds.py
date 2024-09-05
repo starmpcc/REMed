@@ -78,21 +78,12 @@ def get_parser():
         help="number of parallel workers."
     )
 
-    # NOTE this will be omitted in the future when the related issue is solved
-    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
-    parser.add_argument(
-        "--mimic_dir",
-        help="path to directory for MIMIC-IV database where it contains hosp/ and icu/ as a"
-            "subdirectory."
-    )
-
     return parser
 
 def main(args):
     root_path = Path(args.root)
     output_dir = Path(args.output_dir)
     metadata_dir = Path(args.metadata_dir)
-    mimic_dir = Path(args.mimic_dir)
 
     if not output_dir.exists():
         output_dir.mkdir()
@@ -124,15 +115,6 @@ def main(args):
     codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
     codes_metadata = codes_metadata.set_index("code")["description"].to_dict()
 
-    # NOTE this will be omitted in the future when the related issue is solved
-    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
-    d_items = pd.read_csv(mimic_dir / "icu" / "d_items.csv.gz")
-    d_items["itemid"] = d_items["itemid"].astype("str")
-    d_items = d_items.set_index("itemid")["label"].to_dict()
-    d_labitems = pd.read_csv(mimic_dir / "hosp" / "d_labitems.csv.gz")
-    d_labitems["itemid"] = d_labitems["itemid"].astype("str")
-    d_labitems = d_labitems.set_index("itemid")["label"].to_dict()
-
     progress_bar = tqdm(data_paths, total=len(data_paths))
     for data_path in progress_bar:
         progress_bar.set_description(str(data_path))
@@ -154,13 +136,12 @@ def main(args):
                 f"\"{birth_code}\" is not found in the codes metadata, which may lead to "
                 "unexpected results since we currently exclude this event from the input data. "
             )
-
         data = data.with_columns(
             pl.when(pl.col("code") == birth_code)
             .then(None)
             .otherwise(pl.col("time")).alias("time")
         )
-        data = data.drop_nulls(subset=["patient_id", "time"])
+        data = data.drop_nulls(subset=["subject_id", "time"])
 
         cohort_path = Path(args.cohort) / subdir / data_path.name
         match cohort_path.suffix:
@@ -174,16 +155,16 @@ def main(args):
         cohort = cohort.drop_nulls(label_col_name)
 
         cohort = cohort.select(
-            [pl.col("patient_id"),
+            [pl.col("subject_id"),
                 pl.col(label_col_name),
                 # pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
                 pl.col("prediction_time").alias("endtime")]
         )
         cohort = cohort.group_by(
-            "patient_id", maintain_order=True
+            "subject_id", maintain_order=True
         ).agg(pl.col(["endtime", label_col_name])).collect() # omitted "starttime"
         cohort_dict = {
-            x["patient_id"]: {
+            x["subject_id"]: {
                 # "starttime": x["starttime"],
                 "endtime": x["endtime"],
                 "label": x[label_col_name],
@@ -191,13 +172,13 @@ def main(args):
         }
 
         def extract_cohort(row):
-            patient_id = row["patient_id"]
+            subject_id = row["subject_id"]
             time = row["time"]
-            if patient_id not in cohort_dict:
+            if subject_id not in cohort_dict:
                 # return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
                 return {"cohort_end": None, "cohort_label": None}
 
-            cohort_criteria = cohort_dict[patient_id]
+            cohort_criteria = cohort_dict[subject_id]
             # starts = cohort_criteria["starttime"]
             ends = cohort_criteria["endtime"]
             labels = cohort_criteria["label"]
@@ -221,9 +202,9 @@ def main(args):
                 # return {"cohort_start": None, "cohort_end": None, "cohort_label": None}
                 return {"cohort_end": None, "cohort_label": None}
 
-        data = data.group_by(["patient_id", "time"], maintain_order=True).agg(pl.all())
+        data = data.group_by(["subject_id", "time"], maintain_order=True).agg(pl.all())
         data = data.with_columns(
-            pl.struct(["patient_id", "time"])
+            pl.struct(["subject_id", "time"])
             .map_elements(
                 extract_cohort,
                 return_dtype=pl.Struct(
@@ -250,10 +231,10 @@ def main(args):
 
         with open(str(output_dir / (output_name + ".tsv")), "a") as manifest_f:
             if os.path.getsize(output_dir / (output_name + ".tsv")) == 0:
-                manifest_f.write("patient_id\tnum_events\tshard_id\n")
+                manifest_f.write("subject_id\tnum_events\tshard_id\n")
 
             must_have_columns = [
-                "patient_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
+                "subject_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
             ]
             rest_of_columns = [x for x in data.columns if x not in must_have_columns]
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
@@ -267,10 +248,6 @@ def main(args):
                 output_dir,
                 output_name,
                 args.workers,
-                # NOTE this will be omitted in the future when the related issue is solved
-                # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
-                d_items,
-                d_labitems
             )
 
             # meds --> remed
@@ -279,12 +256,12 @@ def main(args):
                 length_per_subject_gathered = [meds_to_remed_partial(data)]
                 del data
             else:
-                patient_ids = data["patient_id"].unique().to_list()
-                chunksize = math.ceil(len(patient_ids) / args.workers)
+                subject_ids = data["subject_id"].unique().to_list()
+                chunksize = math.ceil(len(subject_ids) / args.workers)
                 data_chunks = []
-                for i in range(0, len(patient_ids), chunksize):
+                for i in range(0, len(subject_ids), chunksize):
                     data_chunks.append(
-                        data.filter(pl.col("patient_id").is_in(patient_ids[i:i+chunksize]))
+                        data.filter(pl.col("subject_id").is_in(subject_ids[i:i+chunksize]))
                     )
                 del data
                 pool = multiprocessing.get_context("spawn").Pool(processes=args.workers)
@@ -311,14 +288,8 @@ def meds_to_remed(
     output_dir,
     output_name,
     num_shards,
-    # NOTE this will be omitted in the future when the related issue is solved
-    # (https://github.com/mmcdermott/MEDS_transforms/issues/148)
-    d_items,
-    d_labitems,
     df_chunk
 ):
-    code_matching_pattern = re.compile(r"\d+")
-
     def meds_to_remed_unit(row):
         events = []
         digit_offsets = []
@@ -329,47 +300,11 @@ def meds_to_remed(
             col_name_offset = []
             for col_name in ["code", "numeric_value"] + rest_of_columns:
                 col_event = row[column_name_idcs[col_name]][event_index]
-
                 if col_event is not None:
                     col_event = str(col_event)
                     if col_name == "code":
-                        # NOTE temporal hack for addressing missing descriptions for MIMIC-IV from
-                        # MEDS-Transform v0.0.3 (https://github.com/mmcdermott/MEDS_transforms/issues/148),
-                        # will be omitted in the future when it is solved
-                        event_type = col_event.split("//")[0]
-                        if event_type in [
-                            "LAB", "PROCEDURE", "PATIENT_FLUID_OUTPUT", "INFUSION_START",
-                            "INFUSION_END", "DIAGNOSIS"
-                        ]:
-                            items = col_event.split("//")
-                            # for icd codes
-                            if "ICD" in items:
-                                desc = codes_metadata[col_event]
-                                col_event = event_type + "//" + desc
-                            # for item codes
-                            else:
-                                code_idx = [
-                                    bool(code_matching_pattern.fullmatch(item)) for item in items
-                                ].index(True)
-                                code = items[code_idx]
-
-                                do_break = False
-                                if (
-                                    col_event in codes_metadata
-                                    and codes_metadata[col_event] is not None
-                                    and codes_metadata[col_event] != ""
-                                ):
-                                    desc = codes_metadata[col_event]
-                                elif code in d_items:
-                                    desc = d_items[code]
-                                elif code in d_labitems:
-                                    desc = d_labitems[code]
-                                else:
-                                    do_break = True
-                                
-                                if not do_break:
-                                    items[code_idx] = desc
-                                    col_event = "//".join(items)
+                        if col_event in codes_metadata and codes_metadata[col_event] != "":
+                            col_event = codes_metadata[col_event]
                     elif not "id" in col_name:
                         col_event = re.sub(
                             r"\d*\.\d+", lambda x: str(round(float(x.group(0)), 4)),
@@ -492,21 +427,21 @@ def meds_to_remed(
     events_data = np.concatenate(events_data)
 
     df_chunk = df_chunk.select(
-        ["patient_id", "cohort_end", "cohort_label", "time"]
+        ["subject_id", "cohort_end", "cohort_label", "time"]
     )
     df_chunk = df_chunk.insert_column(4, data_index)
     df_chunk = df_chunk.explode(["cohort_end", "cohort_label"])
     df_chunk = df_chunk.group_by(
-        # ["patient_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
-        ["patient_id", "cohort_end", "cohort_label"], maintain_order=True
+        # ["subject_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
+        ["subject_id", "cohort_end", "cohort_label"], maintain_order=True
     ).agg(pl.all())
 
-    # regard {patient_id} as {cohort_id}: {patient_id}_{cohort_number}
+    # regard {subject_id} as {cohort_id}: {subject_id}_{cohort_number}
     df_chunk = df_chunk.with_columns(
-        pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
+        pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
     )
     df_chunk = df_chunk.with_columns(
-        (pl.col("patient_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("patient_id")
+        (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("subject_id")
     )
     # data = data.drop("suffix", "cohort_start", "cohort_end")
     df_chunk = df_chunk.drop("suffix", "cohort_end")
