@@ -26,13 +26,17 @@ class Trainer:
         self.args = args
         set_seed(self.args.seed)
         if self.args.src_data == "meds":
+            if self.args.train_type not in ["remed", "short"]:
+                raise NotImplementedError(
+                    "MEDS dataset only supports REMed and Pretraining (short)."
+                )
             self.df = None  # do not need this for meds dataset
             self.train_subset = args.train_subset if args.train_subset != "" else None
             self.valid_subset = args.valid_subset if args.valid_subset != "" else None
             self.test_subset = args.test_subset if args.test_subset != "" else None
             self.test_cohort = args.test_cohort
             if self.test_cohort is not None:
-                # make patient_id to be {patient_id}_{cohort_number} to prevent duplicated ids
+                # make subject_id to be {subject_id}_{cohort_number} to prevent duplicated ids
                 if os.path.isdir(self.test_cohort):
                     test_cohort = pl.read_parquet(
                         os.path.join(self.test_cohort, "*.parquet")
@@ -40,14 +44,10 @@ class Trainer:
                 else:
                     test_cohort = pl.read_parquet(self.test_cohort)
                 test_cohort = test_cohort.with_columns(
-                    pl.col("patient_id").cum_count().over("patient_id").alias("suffix")
+                    pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
                 )
                 test_cohort = test_cohort.with_columns(
-                    (
-                        pl.col("patient_id").cast(str)
-                        + "_"
-                        + pl.col("suffix").cast(str)
-                    ).alias("patient_id")
+                    (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("subject_id")
                 )
                 test_cohort = test_cohort.drop("suffix")
                 self.test_cohort = test_cohort
@@ -136,7 +136,6 @@ class Trainer:
             )
             if self.log is not None:
                 self.accelerator.end_training()
-        logger.info("done training", main_process_only=True)
 
     def train(self):
         self.early_stopping = EarlyStopping(
@@ -158,9 +157,7 @@ class Trainer:
                 pretrained_path = os.path.join(
                     self.args.save_dir, self.args.pretrained, "checkpoint_best.pt"
                 )
-            logger.info(f"Loading checkpoint from {pretrained_path}.")
             model = load_model(pretrained_path, model)
-            logger.info("Successfully loaded the checkpoint.")
 
         if self.args.enable_fsdp:
             model = self.accelerator.prepare(model)
@@ -274,18 +271,20 @@ class Trainer:
 
         if self.args.src_data == "meds" and self.args.test_cohort is not None:
             if self.accelerator.num_processes == 1:
-                # roll back {patient_id}_{cohort_number} to {patient_id}
+                # roll back {subject_id}_{cohort_number} to {subject_id}
                 self.test_cohort = self.test_cohort.with_columns(
-                    pl.col("patient_id")
-                    .map_elements(lambda x: x.split("_")[0])
+                    pl.col("subject_id")
+                    .map_elements(lambda x: x.split("_")[0], return_dtype=pl.String)
                     .cast(int)
                 )
-                self.test_cohort.write_parquet(
-                    os.path.join(
-                        self.args.save_dir,
-                        self.args.exp_name,
-                        f"{self.test_subset}.parquet",
-                    )
+                exp_name = os.path.basename(self.args.exp_name)
+                save_dir = os.path.join(self.args.save_dir, exp_name)
+                save_path = os.path.join(save_dir, f"{self.test_subset}.parquet")
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                self.test_cohort.write_parquet(save_path)
+                logger.info(
+                    f"Saved the prediction results into the cohort dataframe located in {save_path}"
                 )
             else:
                 logger.warning(
@@ -479,9 +478,7 @@ class Trainer:
             )
         if self.args.train_type != "bioclinicalbert_encode":
             model = self.architecture(self.args)
-            logger.info(f"Loading checkpoint from {best_model_path}")
             model = load_model(best_model_path, model)
-            logger.info("Successfully loaded the checkpoint")
             self.model = self.accelerator.prepare(model)
             self.args.max_seq_len = 1024
             self.args.batch_size = 8
@@ -514,20 +511,16 @@ class Trainer:
                 f.create_group("ehr")
                 encoded = f["ehr"]
 
-                for patient_id, metadata in dataloader.dataset.manifest.iterrows():
-                    stay_g = encoded.create_group(patient_id)
+                for subject_id, metadata in dataloader.dataset.manifest.iterrows():
+                    stay_g = encoded.create_group(subject_id)
                     stay_g.create_dataset(
                         "time",
-                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id][
-                            "time"
-                        ][()],
-                        dtype="i",
+                        data=dataloader.dataset.data[metadata["shard_id"]][subject_id]["time"][()],
+                        dtype="i"
                     )
                     stay_g.create_dataset(
                         "label",
-                        data=dataloader.dataset.data[metadata["shard_id"]][patient_id][
-                            "label"
-                        ][()],
+                        data=dataloader.dataset.data[metadata["shard_id"]][subject_id]["label"][()],
                     )
                 self.accelerator.wait_for_everyone()
 
@@ -544,32 +537,26 @@ class Trainer:
                             all_codes_embs, **batch
                         )  # B, S, E
                         reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
-                        patient_ids = batch["patient_id"].reshape(-1)
+                        subject_ids = batch["subject_id"].reshape(-1)
                         indices = batch["index"].reshape(-1)
-                        for (
-                            repr,
-                            patient_id,
-                            index,
-                        ) in zip(reprs, patient_ids, indices):
+                        for repr, subject_id, index, in zip(reprs, subject_ids, indices):
                             start = self.args.max_seq_len * index
                             end = start + self.args.max_seq_len
-                            max_len = dataloader.dataset.manifest.loc[patient_id][
-                                "num_events"
-                            ]
+                            max_len = dataloader.dataset.manifest.loc[subject_id]["num_events"]
                             if end > max_len:
                                 repr = repr[: max_len - start, :]
                                 end = max_len
-                            if patient_id not in buffer:
-                                buffer[patient_id] = []
-                            heapq.heappush(buffer[patient_id], (index, repr))
+                            if subject_id not in buffer:
+                                buffer[subject_id] = []
+                            heapq.heappush(buffer[subject_id], (index, repr))
                         if ((i + 1) % 100 == 0) or ((i + 1) == len(loader)):
                             # flush buffer if applicable
-                            for patient_id in list(buffer.keys()):
-                                items = buffer[patient_id]
-                                metadata = dataloader.dataset.manifest.loc[patient_id]
+                            for subject_id in list(buffer.keys()):
+                                items = buffer[subject_id]
+                                metadata = dataloader.dataset.manifest.loc[subject_id]
                                 if len(items) == metadata["num_samples"]:
                                     data = np.concatenate([x[1] for x in items])
-                                    encoded[patient_id].create_dataset(
+                                    encoded[subject_id].create_dataset(
                                         "encoded",
                                         data=data,
                                         dtype="i2",
@@ -580,7 +567,7 @@ class Trainer:
                                             self.args.pred_dim,
                                         ),
                                     )
-                                    del buffer[patient_id]
+                                    del buffer[subject_id]
 
             self.accelerator.wait_for_everyone()
             if self.accelerator.num_processes == 1:

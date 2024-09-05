@@ -60,10 +60,12 @@ class N_Epoch:
 
 
 def load_model(path, model):
-    state_dict = torch.load(path, map_location="cpu")
+    logger.info(f"Loading checkpoint from {path}")
+    state_dict = torch.load(path, map_location="cpu", weights_only=True)
     if "pred_model.model.embed_positions.weight" in state_dict:
         del state_dict["pred_model.model.embed_positions.weight"]
     model.load_state_dict(state_dict, strict=False)
+    logger.info("Successfully loaded the checkpoint")
     return model
 
 
