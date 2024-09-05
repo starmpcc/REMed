@@ -6,7 +6,7 @@ import polars as pl
 import torch
 from tqdm import tqdm
 
-from ..dataset import ReprDataset, MEDSReprDataset
+from ..dataset import MEDSReprDataset, ReprDataset
 from ..models import REMed
 from ..utils.trainer_utils import PredLoss, PredMetric, get_max_seq_len, log_from_dict
 from . import register_trainer
@@ -50,13 +50,9 @@ class REMedTrainer(Trainer):
                 self.optimizer.step()
                 self.scheduler.step()
             self.metric(logging_outputs, accelerator)
-            if (
-                not self.args.debug
-                and self.accelerator.is_main_process
-                and self.args.log_loss
-            ):
+            if self.log and self.accelerator.is_main_process and self.args.log_loss:
                 self.accelerator.log({f"{split}_loss": loss})
-            
+
             return net_output, logging_outputs
 
         if split == self.train_subset:
