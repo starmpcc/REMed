@@ -59,6 +59,14 @@ def get_parser():
             "is set to `'meds'`."
     )
     parser.add_argument(
+        "--unique_events_path",
+        type=str,
+        default=None,
+        help="path to directory containing `unique_events.h5` to encode events in MEDS dataset. "
+            "only used when `--src_data` is set to `'meds'`"
+    )
+
+    parser.add_argument(
         "--test_cohort",
         type=str,
         default=None,
@@ -81,6 +89,7 @@ def get_parser():
             "mortality_3",
             "mortality_7",
             "mortality_14",
+            "mortality",
             "diagnosis",
             "creatinine_1",
             "creatinine_2",

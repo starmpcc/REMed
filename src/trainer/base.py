@@ -2,12 +2,15 @@ import heapq
 import logging
 import os
 import uuid
+import pickle
 from contextlib import nullcontext
 from shutil import rmtree
+from datetime import timedelta
 
 import polars as pl
 import torch
 from accelerate import Accelerator
+from accelerate import InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import broadcast, set_seed
 from h5pickle import File
@@ -39,7 +42,7 @@ class Trainer:
                 # make subject_id to be {subject_id}_{cohort_number} to prevent duplicated ids
                 if os.path.isdir(self.test_cohort):
                     test_cohort = pl.read_parquet(
-                        os.path.join(self.test_cohort, "*.parquet")
+                        os.path.join(self.test_cohort, self.test_subset, "*.parquet")
                     )
                 else:
                     test_cohort = pl.read_parquet(self.test_cohort)
@@ -64,13 +67,18 @@ class Trainer:
         self.log = None if self.args.debug or not self.args.wandb else "wandb"
 
     def run(self):
+        ipg_handler = InitProcessGroupKwargs(timeout=timedelta(hours=24))
         self.accelerator = Accelerator(
-            log_with=self.log, split_batches=True, mixed_precision="bf16"
+            kwargs_handlers=[ipg_handler], log_with=self.log, split_batches=True, mixed_precision="bf16"
         )
         self.args.local_batch_size = (
             self.args.batch_size // self.accelerator.num_processes
         )
-        if self.args.resume_name:
+        if self.args.src_data == "meds":
+            if self.args.save_dir.endswith("/"):
+                self.args.save_dir = self.args.save_dir[:-1]
+            self.args.exp_name = os.path.basename(self.args.save_dir) + "_" + str(self.args.seed)
+        elif self.args.resume_name:
             self.args.exp_name = self.args.resume_name
         else:
             self.args.exp_name = f"{uuid.uuid4().hex}_{self.args.seed}"
@@ -120,6 +128,13 @@ class Trainer:
 
         if self.args.encode_events or self.args.encode_only:
             if self.args.src_data == "meds":
+                assert self.args.encode_events and self.args.encode_only, (
+                    "encoding MEDS dataset should be run with both the `self.args.encode_events` "
+                    "and `self.args.encode_only` being True."
+                )
+                assert self.args.unique_events_path is not None, (
+                    "`--unique_events_path` shuold be provided to encode MEDS dataset."
+                )
                 self.encode_events_meds()
             else:
                 self.encode_events()
@@ -148,6 +163,9 @@ class Trainer:
         valid_loader = self.dataloader_set(self.valid_subset)
 
         model = self.architecture(self.args)
+        assert self.args.pretrained is None or self.args.resume_name is None, (
+            "--pretrained and --resume_name should not be provided together"
+        )
         if self.args.pretrained and not self.args.no_pretrained_checkpoint:
             if self.args.src_data == "meds":
                 pretrained_path = os.path.join(
@@ -158,6 +176,9 @@ class Trainer:
                     self.args.save_dir, self.args.pretrained, "checkpoint_best.pt"
                 )
             model = load_model(pretrained_path, model)
+        elif self.args.src_data == "meds" and self.args.resume_name is not None:
+            resume_path = os.path.join(self.args.resume_name, "checkpoint_last.pt")
+            model = load_model(resume_path, model)
 
         if self.args.enable_fsdp:
             model = self.accelerator.prepare(model)
@@ -277,8 +298,7 @@ class Trainer:
                     .map_elements(lambda x: x.split("_")[0], return_dtype=pl.String)
                     .cast(int)
                 )
-                exp_name = os.path.basename(self.args.exp_name)
-                save_dir = os.path.join(self.args.save_dir, exp_name)
+                save_dir = self.args.save_dir
                 save_path = os.path.join(save_dir, f"{self.test_subset}.parquet")
                 if not os.path.exists(save_dir):
                     os.makedirs(save_dir)
@@ -295,7 +315,7 @@ class Trainer:
         return metric_dict
 
     def dataloader_set(self, split):
-        if split is None:
+        if self.args.src_data == "meds" and split is None:
             return None
         dataset = self.dataset(self.args, split, self.data, self.df)
         return DataLoader(
@@ -303,7 +323,7 @@ class Trainer:
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=8,
-            pin_memory=True,
+            pin_memory=False,
             collate_fn=dataset.collate_fn,
             persistent_workers=True,
         )
@@ -340,9 +360,8 @@ class Trainer:
 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
-        if self.log is None:
-            print(log_dict)
-        else:
+        logger.info(log_dict)
+        if self.log is not None:
             self.accelerator.log(log_dict)
         return metrics
 
@@ -356,8 +375,10 @@ class Trainer:
             model = self.architecture(self.args)
             model = load_model(best_model_path, model)
             self.model = self.accelerator.prepare(model)
-            self.args.max_seq_len = 1024
-            self.args.batch_size = 8
+            # self.args.max_seq_len = 1024
+            # self.args.batch_size = 8
+            self.args.max_seq_len = 512
+            self.args.batch_size = 16
         else:
             self.args.max_seq_len = 512
             self.args.batch_size = 8
@@ -372,7 +393,7 @@ class Trainer:
             postfix = "" if i == -1 else "_" + str(i)
             return os.path.join(
                 self.args.save_dir,
-                self.args.exp_name,
+                # self.args.exp_name,
                 f"{self.args.src_data}_encoded{postfix}.h5",
             )
 
@@ -387,22 +408,20 @@ class Trainer:
             k = str(k)
             stay_g = encoded.create_group(k)
             stay_g.create_dataset(
-                "encoded",
-                shape=(len(self.data["ehr"][k]["time"]), self.args.pred_dim),
-                dtype="i2",
-                compression="lzf",
-                shuffle=True,
-                chunks=(len(self.data["ehr"][k]["time"]), self.args.pred_dim),
+                "time", data=self.data["ehr"][k]["time"][()]
             )
+            stay_g.attrs.update(self.data["ehr"][k].attrs)
         self.accelerator.wait_for_everyone()
 
         with torch.no_grad():
             loader = enumerate(dataloader)
             if self.accelerator.is_main_process:
-                loader = tqdm(loader)
+                loader = tqdm(loader, total=len(dataloader))
+            buffer = {}
             for i, batch in loader:
                 self.step = i
                 all_codes_embs = self.model.input2emb_model(**batch)
+                # (16, 512, 128) -> (16, 512, 128, 512) -> (16 * 512, 128, 512)
 
                 reprs = self.model.eventencoder_model(
                     all_codes_embs, **batch
@@ -411,26 +430,36 @@ class Trainer:
                 stay_ids = batch["stay_id"].cpu().numpy().reshape(-1)
                 indices = batch["index"].cpu().numpy().reshape(-1)
                 for repr, stay_id, index in zip(reprs, stay_ids, indices):
-                    stay_id, index = int(stay_id), int(index)
                     start = self.args.max_seq_len * index
                     end = start + self.args.max_seq_len
-                    max_len = encoded[str(stay_id)]["encoded"].shape[0]
+                    max_len = dataloader.dataset.df["time"].loc[stay_id]
                     if end > max_len:
                         repr = repr[: max_len - start, :]
                         end = max_len
-                    encoded[str(stay_id)]["encoded"][start:end, :] = repr
+                    if stay_id not in buffer:
+                        buffer[stay_id] = []
+                    heapq.heappush(buffer[stay_id], (index, repr))
+                if ((i + 1) % 100 == 0) or ((i + 1) == len(loader)):
+                    for stay_id in list(buffer.keys()):
+                        items = buffer[stay_id]
+                        num_events = dataloader.dataset.df["time"].loc[stay_id]
+                        num_samples = dataloader.dataset.df["num_sample_per_pat"].loc[stay_id]
+                        if len(items) == num_samples:
+                            data = np.concatenate([x[1] for x in items])
+                            encoded[str(stay_id)].create_dataset(
+                                "encoded",
+                                data=data,
+                                dtype="i2",
+                                compression="lzf",
+                                shuffle=True,
+                                chunks=(num_events, self.args.pred_dim)
+                            )
+                            del buffer[stay_id]
         f.close()
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.num_processes == 1:
             os.rename(hdf5_path, _get_hdf5_path(-1))
-            main_file = File(_get_hdf5_path(-1), "r+")
-            for k in tqdm(self.data["ehr"].keys()):
-                main_file["ehr"][k].create_dataset(
-                    "time", data=self.data["ehr"][k]["time"][()]
-                )
-                main_file["ehr"][k].attrs.update(self.data["ehr"][k].attrs)
-            main_file.close()
         else:
             if self.accelerator.is_main_process:
                 main_file = File(_get_hdf5_path(-1), "w")
@@ -470,138 +499,79 @@ class Trainer:
 
     # to add compatibility with meds dataset
     def encode_events_meds(self):
-        if self.args.encode_only:
-            best_model_path = os.path.join(self.args.resume_name, "checkpoint_best.pt")
-        else:
-            best_model_path = os.path.join(
-                self.args.save_dir, self.args.exp_name, "checkpoint_best.pt"
-            )
-        if self.args.train_type != "bioclinicalbert_encode":
-            model = self.architecture(self.args)
-            model = load_model(best_model_path, model)
-            self.model = self.accelerator.prepare(model)
-            self.args.max_seq_len = 1024
-            self.args.batch_size = 8
-        else:
-            self.args.max_seq_len = 512
-            self.args.batch_size = 8
+        best_model_path = os.path.join(self.args.resume_name, "checkpoint_best.pt")
+        model = self.architecture(self.args)
+        model = load_model(best_model_path, model)
+        self.model = self.accelerator.prepare(model)
         self.model.eval()
 
-        self.dataset = MEDSForReprGen
+        logger.info(
+            f"Start to generate representation vectors for each of unique events in MEDS dataset"
+        )
+        dataset = MEDSForReprGen(self.args, self.args.unique_events_path)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=False,
+            collate_fn=dataset.collate_fn,
+            persistent_workers=True,
+        )
+        dataloader = self.accelerator.prepare(dataloader)
 
-        for split in [self.train_subset, self.valid_subset, self.test_subset]:
-            if split is None:
-                continue
-            logger.info(f"Start Encoding for {split} split")
+        event_to_vec = {}
+        with torch.no_grad():
+            loader = enumerate(dataloader)
+            loader = tqdm(
+                loader, total=len(dataloader), desc=str(self.accelerator.local_process_index)
+            )
+            for i, batch in loader:
+                self.step = i
+                
+                embedded = self.accelerator.unwrap_model(self.model).input2emb_model(**batch)
+                event_vectors = (
+                    self.accelerator.unwrap_model(self.model).eventencoder_model(embedded, **batch)
+                ).squeeze(1) # (B, 1, E) -> (B, E)
+                event_vectors = event_vectors.cpu().bfloat16().view(torch.int16).numpy()
 
-            dataloader = self.dataloader_set(split)
-            dataloader = self.accelerator.prepare(dataloader)
+                input_ids = batch["input_ids"].cpu().numpy() # (B, 128)
+                for j, event in enumerate(input_ids):
+                    event_tuple = tuple(event[event != 0])
+                    event_to_vec[event_tuple] = event_vectors[j]
 
-            def _get_hdf5_path(i):
-                postfix = "" if i == -1 else "_" + str(i)
-                return os.path.join(
-                    self.args.save_dir,
-                    f"{split}_encoded{postfix}.h5",
-                )
+        def get_local_path(i):
+            postfix = "" if i == -1 else "_" + str(i)
+            return os.path.join(self.args.save_dir, f"event_to_vec{postfix}.pkl")
 
-            hdf5_path = _get_hdf5_path(self.accelerator.local_process_index)
-            logger.info("Writing metadata to HDF5")
+        local_path = get_local_path(self.accelerator.local_process_index)
+        logger.info("Saving the resulted vector maps...")
+        with open(local_path, "wb") as f:
+            pickle.dump(event_to_vec, f)
+        logger.info("Done!")
+        self.accelerator.wait_for_everyone()
 
-            with File(hdf5_path, "w") as f:
-                f.create_group("ehr")
-                encoded = f["ehr"]
+        if self.accelerator.num_processes == 1:
+            if os.path.exists(get_local_path(-1)):
+                os.remove(get_local_path(-1))
+            os.rename(local_path, get_local_path(-1))
+        else:
+            if self.accelerator.is_main_process:
+                main_dict = {}
+                local_dicts = []
+                for i in range(self.accelerator.num_processes):
+                    with open(get_local_path(i), "rb") as local_f:
+                        local_dicts.append(pickle.load(local_f))
+                logger.info("Gathering and summarizing local vector maps...")
+                for local_dict in local_dicts:
+                    # NOTE only work in python >= 3.9.0
+                    main_dict = main_dict | local_dict
+                
+                if os.path.exists(get_local_path(-1)):
+                    os.remove(get_local_path(-1))
+                with open(get_local_path(-1), "wb") as main_f:
+                    pickle.dump(main_dict, main_f)
 
-                for subject_id, metadata in dataloader.dataset.manifest.iterrows():
-                    stay_g = encoded.create_group(subject_id)
-                    stay_g.create_dataset(
-                        "time",
-                        data=dataloader.dataset.data[metadata["shard_id"]][subject_id]["time"][()],
-                        dtype="i"
-                    )
-                    stay_g.create_dataset(
-                        "label",
-                        data=dataloader.dataset.data[metadata["shard_id"]][subject_id]["label"][()],
-                    )
-                self.accelerator.wait_for_everyone()
-
-                with torch.no_grad():
-                    loader = enumerate(dataloader)
-                    if self.accelerator.is_main_process:
-                        loader = tqdm(loader, total=len(dataloader))
-                    buffer = {}
-                    for i, batch in loader:
-                        self.step = i
-                        all_codes_embs = self.model.input2emb_model(**batch)
-
-                        reprs = self.model.eventencoder_model(
-                            all_codes_embs, **batch
-                        )  # B, S, E
-                        reprs = reprs.cpu().bfloat16().view(torch.int16).numpy()
-                        subject_ids = batch["subject_id"].reshape(-1)
-                        indices = batch["index"].reshape(-1)
-                        for repr, subject_id, index, in zip(reprs, subject_ids, indices):
-                            start = self.args.max_seq_len * index
-                            end = start + self.args.max_seq_len
-                            max_len = dataloader.dataset.manifest.loc[subject_id]["num_events"]
-                            if end > max_len:
-                                repr = repr[: max_len - start, :]
-                                end = max_len
-                            if subject_id not in buffer:
-                                buffer[subject_id] = []
-                            heapq.heappush(buffer[subject_id], (index, repr))
-                        if ((i + 1) % 100 == 0) or ((i + 1) == len(loader)):
-                            # flush buffer if applicable
-                            for subject_id in list(buffer.keys()):
-                                items = buffer[subject_id]
-                                metadata = dataloader.dataset.manifest.loc[subject_id]
-                                if len(items) == metadata["num_samples"]:
-                                    data = np.concatenate([x[1] for x in items])
-                                    encoded[subject_id].create_dataset(
-                                        "encoded",
-                                        data=data,
-                                        dtype="i2",
-                                        compression="lzf",
-                                        shuffle=True,
-                                        chunks=(
-                                            metadata["num_events"],
-                                            self.args.pred_dim,
-                                        ),
-                                    )
-                                    del buffer[subject_id]
-
-            self.accelerator.wait_for_everyone()
-            if self.accelerator.num_processes == 1:
-                os.rename(hdf5_path, _get_hdf5_path(-1))
-            else:
-                if self.accelerator.is_main_process:
-                    main_file = File(_get_hdf5_path(-1), "w")
-                    main_file.create_group("ehr")
-                    files = [
-                        File(_get_hdf5_path(i), "r")
-                        for i in range(self.accelerator.num_processes)
-                    ]
-                    for k in tqdm(dataloader.dataset.manifest.index):
-                        # Chunkwise sum, but may be duplicated chunks
-                        encodeds = (
-                            np.stack(
-                                [f["ehr"][k]["encoded"][()] for f in files], axis=0
-                            )
-                            .astype(np.uint16)
-                            .max(axis=0)
-                            .astype(np.int16)
-                        )
-                        main_file["ehr"].create_group(k)
-                        main_file["ehr"][k].create_dataset(
-                            "encoded",
-                            data=encodeds,
-                            dtype="i2",
-                            compression="lzf",
-                            shuffle=True,
-                            chunks=encodeds.shape,
-                        )
-                    for f in files:
-                        f.close()
-                    main_file.close()
-                    for i in range(self.accelerator.num_processes):
-                        os.remove(_get_hdf5_path(i))
-            self.accelerator.wait_for_everyone()
+                for i in range(self.accelerator.num_processes):
+                    os.remove(get_local_path(i))
+        self.accelerator.wait_for_everyone()

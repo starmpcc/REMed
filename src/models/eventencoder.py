@@ -31,6 +31,12 @@ class TransformerEventEncoder(EventEncoder):
         )
 
     def forward(self, all_codes_embs, input_ids, **kwargs):
+        # all_codes_embs: (B * S, L, Hidden) -- (16 * 512, 128, 512)
+        # input_ids: (B, S, L) -- (16, 512, 128)
+        if input_ids.ndim == 2:
+            assert input_ids.size(0) == all_codes_embs.size(0)
+            input_ids = input_ids.unsqueeze(1) # (B, L) -> (B, 1, L)
+
         B, S, L = input_ids.shape
         # All-padding col -> cause nan output -> unmask it (and multiply 0 to the results)
         src_pad_mask = (input_ids.reshape(-1, L).eq(0)) ^ (

@@ -89,10 +89,10 @@ class REMedTrainer(Trainer):
 
             for sample in t:
                 if split == self.train_subset:
-                    self.model.set_mode("scorer")
+                    self.accelerator.unwrap_model(self.model).set_mode("scorer")
                     net_output, logging_output = step(sample)
 
-                self.model.set_mode("predictor")
+                self.accelerator.unwrap_model(self.model).set_mode("predictor")
                 net_output, logging_output = step(sample)
 
                 # meds -- output
@@ -105,6 +105,14 @@ class REMedTrainer(Trainer):
         if do_output_cohort:
             predicted_cohort = pl.DataFrame(predicted_cohort)
             self.test_cohort = self.test_cohort.join(predicted_cohort, on="subject_id", how="left")
+            self.test_cohort = self.test_cohort.select(
+                [
+                    pl.col("boolean_prediction"),
+                    pl.col("subject_id"),
+                    pl.col("prediction_time"),
+                    pl.col("boolean_value")
+                ]
+            )
 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)

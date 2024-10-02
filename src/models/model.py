@@ -478,16 +478,16 @@ class DescEmb(nn.Module):
         self.time_encoder = FlattenTimeEncoding(args)
         self.layer_norm = nn.LayerNorm(args.pred_dim, eps=1e-12)
 
-    def forward(self, input_ids, type_ids, dpe_ids, times, **kwargs):
-        B, S = input_ids.shape[0], input_ids.shape[1]
-
+    def forward(self, input_ids, type_ids, dpe_ids, times=None, **kwargs):
         x = self.input_ids_embedding(input_ids)
         x += self.type_ids_embedding(type_ids)
         x += self.dpe_ids_embedding(dpe_ids)
         if "flatten" in self.args.train_type:  # (B, S, E) -> (B, S, E)
             x = self.time_encoder(x, times, **kwargs)
-        else:  # (B, S, W, E) -> (B*S, W, E)
-            x = x.view(B * S, -1, self.args.pred_dim)
+        else:  
+            if input_ids.ndim == 3: # x: (B, S, W, E) -> (B*S, W, E)
+                B, S, W = input_ids.shape
+                x = x.view(B * S, -1, self.args.pred_dim)
             x = self.pos_encoder(x)
         x = self.layer_norm(x)
         return x

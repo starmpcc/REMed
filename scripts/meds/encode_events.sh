@@ -24,10 +24,10 @@ if [ "$#" -lt 4 ]; then
     display_help
 fi
 
-PROCESSED_MEDS_DIR="$1"
+UNIQUE_EVENTS_DIR="$1"
 SAVE_DIR="$2"
-GPU_ID="$3"
-PRETRAINED_CHECKPOINT_DIR="$4"
+PRETRAINED_CHECKPOINT_DIR="$3"
+GPU_ID="$4"
 
 accelerate launch \
     --config_file config/single.json \
@@ -35,11 +35,12 @@ accelerate launch \
     --gpu_ids="$GPU_ID" \
     main.py \
     --src_data meds \
-    --input_path "$PROCESSED_MEDS_DIR" \
+    --input_path null \
+    --unique_events_path "$UNIQUE_EVENTS_DIR" \
     --save_dir "$SAVE_DIR" \
     --pred_targets meds_single_task \
     --train_type short \
-    --random_sample \
+    --batch_size 8192 \
     --encode_events \
     --encode_only \
     --resume_name "$PRETRAINED_CHECKPOINT_DIR"
