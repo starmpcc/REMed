@@ -65,7 +65,7 @@ def main(args):
 
     subdirs = [
         os.path.relpath(os.path.dirname(p), os.path.abspath(args.root))
-        for p in filelist
+        for p in filelist if "unique_events" not in p
     ]
     output_dirs = [
         os.path.join(args.output_dir, subdir) for subdir in subdirs
