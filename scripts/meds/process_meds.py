@@ -5,7 +5,6 @@ import multiprocessing
 import os
 import re
 import shutil
-
 import warnings
 from argparse import ArgumentParser
 from bisect import bisect_left, bisect_right
@@ -22,6 +21,7 @@ from transformers import AutoTokenizer
 pool_manager = multiprocessing.Manager()
 warned_codes = pool_manager.list()
 
+
 def find_boundary_between(tuples_list, start, end):
     starts = [s for s, e in tuples_list]
     ends = [e for s, e in tuples_list]
@@ -31,6 +31,7 @@ def find_boundary_between(tuples_list, start, end):
     assert start_index < end_index
 
     return start_index, end_index
+
 
 def get_parser():
     parser = ArgumentParser()
@@ -84,10 +85,11 @@ def get_parser():
         "--mimic_dir",
         default=None,
         help="path to directory for MIMIC-IV database containing hosp/ and icu/ as a subdirectory. "
-            "this is used for addressing missing descriptions in the metadata for MIMIC-IV codes."
+        "this is used for addressing missing descriptions in the metadata for MIMIC-IV codes.",
     )
 
     return parser
+
 
 def main(args):
     root_path = Path(args.root)
@@ -179,15 +181,18 @@ def main(args):
         cohort = cohort.unique()
 
         cohort = cohort.select(
-            [pl.col("subject_id"),
+            [
+                pl.col("subject_id"),
                 pl.col(label_col_name),
                 # pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
                 pl.col("prediction_time").alias("endtime"),
             ]
         )
-        cohort = cohort.group_by(
-            "subject_id", maintain_order=True
-        ).agg(pl.col(["endtime", label_col_name])).collect() # omitted "starttime"
+        cohort = (
+            cohort.group_by("subject_id", maintain_order=True)
+            .agg(pl.col(["endtime", label_col_name]))
+            .collect()
+        )  # omitted "starttime"
         cohort_dict = {
             x["subject_id"]: {
                 # "starttime": x["starttime"],
@@ -229,16 +234,23 @@ def main(args):
                 return {"cohort_end": None, "cohort_label": None}
 
         data = data.group_by(["subject_id", "time"], maintain_order=True).agg(pl.all())
-        data = data.with_columns(
-            pl.struct(["subject_id", "time"])
-            .map_elements(
-                extract_cohort,
-                return_dtype=pl.Struct(
-                    {"cohort_end": pl.List(pl.Datetime()), "cohort_label": pl.List(pl.Boolean)}
+        data = (
+            data.with_columns(
+                pl.struct(["subject_id", "time"])
+                .map_elements(
+                    extract_cohort,
+                    return_dtype=pl.Struct(
+                        {
+                            "cohort_end": pl.List(pl.Datetime()),
+                            "cohort_label": pl.List(pl.Boolean),
+                        }
+                    ),
                 )
+                .alias("cohort_criteria")
             )
-            .alias("cohort_criteria")
-        ).unnest("cohort_criteria").collect()
+            .unnest("cohort_criteria")
+            .collect()
+        )
 
         data = data.drop_nulls("cohort_label")
 
@@ -264,7 +276,12 @@ def main(args):
                 manifest_f.write("subject_id\tnum_events\tshard_id\n")
 
             must_have_columns = [
-                "subject_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
+                "subject_id",
+                "cohort_end",
+                "cohort_label",
+                "time",
+                "code",
+                "numeric_value",
             ]
             rest_of_columns = [x for x in data.columns if x not in must_have_columns]
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
@@ -318,6 +335,7 @@ def main(args):
                 for subject_id, (length, shard_id) in length_per_subject.items():
                     manifest_f.write(f"{subject_id}\t{length}\t{shard_id}\n")
 
+
 def meds_to_remed(
     tokenizer,
     rest_of_columns,
@@ -329,7 +347,7 @@ def meds_to_remed(
     d_items,
     d_labitems,
     warned_codes,
-    df_chunk
+    df_chunk,
 ):
     code_matching_pattern = re.compile(r"\d+")
 
@@ -350,13 +368,17 @@ def meds_to_remed(
                 if col_event is not None:
                     col_event = str(col_event)
                     if col_name == "code":
-                        if col_event in codes_metadata and codes_metadata[col_event] != "":
+                        if (
+                            col_event in codes_metadata
+                            and codes_metadata[col_event] != ""
+                        ):
                             col_event = codes_metadata[col_event]
                         else:
                             do_break = False
                             items = col_event.split("//")
                             is_code = [
-                                bool(code_matching_pattern.fullmatch(item)) for item in items
+                                bool(code_matching_pattern.fullmatch(item))
+                                for item in items
                             ]
                             if True in is_code:
                                 if d_items is not None and d_labitems is not None:
@@ -377,12 +399,12 @@ def meds_to_remed(
                                     do_break = True
 
                             if do_break and col_event not in warned_codes:
-                                    warned_codes.append(col_event)
-                                    warnings.warn(
-                                        "The dataset contains some codes that are not specified in "
-                                        "the codes metadata, which may not be intended. Note that we "
-                                        f"process this code as it is for now: {col_event}."
-                                    )
+                                warned_codes.append(col_event)
+                                warnings.warn(
+                                    "The dataset contains some codes that are not specified in "
+                                    "the codes metadata, which may not be intended. Note that we "
+                                    f"process this code as it is for now: {col_event}."
+                                )
                     else:
                         col_event = re.sub(
                             r"\d*\.\d+",
@@ -521,14 +543,13 @@ def meds_to_remed(
     )
     events_data = np.concatenate(events_data)
 
-    df_chunk = df_chunk.select(
-        ["subject_id", "cohort_end", "cohort_label", "time"]
-    )
+    df_chunk = df_chunk.select(["subject_id", "cohort_end", "cohort_label", "time"])
     df_chunk = df_chunk.insert_column(4, data_index)
     df_chunk = df_chunk.explode(["cohort_end", "cohort_label"])
     df_chunk = df_chunk.group_by(
         # ["subject_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
-        ["subject_id", "cohort_end", "cohort_label"], maintain_order=True
+        ["subject_id", "cohort_end", "cohort_label"],
+        maintain_order=True,
     ).agg(pl.all())
 
     # regard {subject_id} as {cohort_id}: {subject_id}_{cohort_number}
@@ -536,7 +557,9 @@ def meds_to_remed(
         pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
     )
     df_chunk = df_chunk.with_columns(
-        (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("subject_id")
+        (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias(
+            "subject_id"
+        )
     )
     # data = data.drop("suffix", "cohort_start", "cohort_end")
     df_chunk = df_chunk.drop("suffix", "cohort_end")
@@ -578,6 +601,7 @@ def meds_to_remed(
     del df_chunk
 
     return length_per_subject
+
 
 if __name__ == "__main__":
     parser = get_parser()

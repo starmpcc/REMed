@@ -35,7 +35,7 @@ class TransformerEventEncoder(EventEncoder):
         # input_ids: (B, S, L) -- (16, 512, 128)
         if input_ids.ndim == 2:
             assert input_ids.size(0) == all_codes_embs.size(0)
-            input_ids = input_ids.unsqueeze(1) # (B, L) -> (B, 1, L)
+            input_ids = input_ids.unsqueeze(1)  # (B, L) -> (B, 1, L)
 
         B, S, L = input_ids.shape
         # All-padding col -> cause nan output -> unmask it (and multiply 0 to the results)

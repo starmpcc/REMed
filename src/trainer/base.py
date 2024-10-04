@@ -1,16 +1,15 @@
 import heapq
 import logging
 import os
-import uuid
 import pickle
+import uuid
 from contextlib import nullcontext
-from shutil import rmtree
 from datetime import timedelta
+from shutil import rmtree
 
 import polars as pl
 import torch
-from accelerate import Accelerator
-from accelerate import InitProcessGroupKwargs
+from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import broadcast, set_seed
 from h5pickle import File
@@ -50,7 +49,11 @@ class Trainer:
                     pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
                 )
                 test_cohort = test_cohort.with_columns(
-                    (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("subject_id")
+                    (
+                        pl.col("subject_id").cast(str)
+                        + "_"
+                        + pl.col("suffix").cast(str)
+                    ).alias("subject_id")
                 )
                 test_cohort = test_cohort.drop("suffix")
                 self.test_cohort = test_cohort
@@ -69,7 +72,10 @@ class Trainer:
     def run(self):
         ipg_handler = InitProcessGroupKwargs(timeout=timedelta(hours=24))
         self.accelerator = Accelerator(
-            kwargs_handlers=[ipg_handler], log_with=self.log, split_batches=True, mixed_precision="bf16"
+            kwargs_handlers=[ipg_handler],
+            log_with=self.log,
+            split_batches=True,
+            mixed_precision="bf16",
         )
         self.args.local_batch_size = (
             self.args.batch_size // self.accelerator.num_processes
@@ -77,7 +83,9 @@ class Trainer:
         if self.args.src_data == "meds":
             if self.args.save_dir.endswith("/"):
                 self.args.save_dir = self.args.save_dir[:-1]
-            self.args.exp_name = os.path.basename(self.args.save_dir) + "_" + str(self.args.seed)
+            self.args.exp_name = (
+                os.path.basename(self.args.save_dir) + "_" + str(self.args.seed)
+            )
         elif self.args.resume_name:
             self.args.exp_name = self.args.resume_name
         else:
@@ -132,9 +140,9 @@ class Trainer:
                     "encoding MEDS dataset should be run with both the `self.args.encode_events` "
                     "and `self.args.encode_only` being True."
                 )
-                assert self.args.unique_events_path is not None, (
-                    "`--unique_events_path` shuold be provided to encode MEDS dataset."
-                )
+                assert (
+                    self.args.unique_events_path is not None
+                ), "`--unique_events_path` shuold be provided to encode MEDS dataset."
                 self.encode_events_meds()
             else:
                 self.encode_events()
@@ -163,9 +171,9 @@ class Trainer:
         valid_loader = self.dataloader_set(self.valid_subset)
 
         model = self.architecture(self.args)
-        assert self.args.pretrained is None or self.args.resume_name is None, (
-            "--pretrained and --resume_name should not be provided together"
-        )
+        assert (
+            self.args.pretrained is None or self.args.resume_name is None
+        ), "--pretrained and --resume_name should not be provided together"
         if self.args.pretrained and not self.args.no_pretrained_checkpoint:
             if self.args.src_data == "meds":
                 pretrained_path = os.path.join(
@@ -407,9 +415,7 @@ class Trainer:
         for k in self.data["ehr"].keys():
             k = str(k)
             stay_g = encoded.create_group(k)
-            stay_g.create_dataset(
-                "time", data=self.data["ehr"][k]["time"][()]
-            )
+            stay_g.create_dataset("time", data=self.data["ehr"][k]["time"][()])
             stay_g.attrs.update(self.data["ehr"][k].attrs)
         self.accelerator.wait_for_everyone()
 
@@ -443,7 +449,9 @@ class Trainer:
                     for stay_id in list(buffer.keys()):
                         items = buffer[stay_id]
                         num_events = dataloader.dataset.df["time"].loc[stay_id]
-                        num_samples = dataloader.dataset.df["num_sample_per_pat"].loc[stay_id]
+                        num_samples = dataloader.dataset.df["num_sample_per_pat"].loc[
+                            stay_id
+                        ]
                         if len(items) == num_samples:
                             data = np.concatenate([x[1] for x in items])
                             encoded[str(stay_id)].create_dataset(
@@ -452,7 +460,7 @@ class Trainer:
                                 dtype="i2",
                                 compression="lzf",
                                 shuffle=True,
-                                chunks=(num_events, self.args.pred_dim)
+                                chunks=(num_events, self.args.pred_dim),
                             )
                             del buffer[stay_id]
         f.close()
@@ -524,18 +532,26 @@ class Trainer:
         with torch.no_grad():
             loader = enumerate(dataloader)
             loader = tqdm(
-                loader, total=len(dataloader), desc=str(self.accelerator.local_process_index)
+                loader,
+                total=len(dataloader),
+                desc=str(self.accelerator.local_process_index),
             )
             for i, batch in loader:
                 self.step = i
-                
-                embedded = self.accelerator.unwrap_model(self.model).input2emb_model(**batch)
+
+                embedded = self.accelerator.unwrap_model(self.model).input2emb_model(
+                    **batch
+                )
                 event_vectors = (
-                    self.accelerator.unwrap_model(self.model).eventencoder_model(embedded, **batch)
-                ).squeeze(1) # (B, 1, E) -> (B, E)
+                    self.accelerator.unwrap_model(self.model).eventencoder_model(
+                        embedded, **batch
+                    )
+                ).squeeze(
+                    1
+                )  # (B, 1, E) -> (B, E)
                 event_vectors = event_vectors.cpu().bfloat16().view(torch.int16).numpy()
 
-                input_ids = batch["input_ids"].cpu().numpy() # (B, 128)
+                input_ids = batch["input_ids"].cpu().numpy()  # (B, 128)
                 for j, event in enumerate(input_ids):
                     event_tuple = tuple(event[event != 0])
                     event_to_vec[event_tuple] = event_vectors[j]
@@ -566,7 +582,7 @@ class Trainer:
                 for local_dict in local_dicts:
                     # NOTE only work in python >= 3.9.0
                     main_dict = main_dict | local_dict
-                
+
                 if os.path.exists(get_local_path(-1)):
                     os.remove(get_local_path(-1))
                 with open(get_local_path(-1), "wb") as main_f:
