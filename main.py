@@ -35,38 +35,46 @@ def get_parser():
         "--src_data",
         type=str,
         choices=["eicu", "mimiciv", "umcdb", "hirid", "meds"],
-        default="mimiciv"
+        default="mimiciv",
     )
     parser.add_argument(
         "--train_subset",
         type=str,
         default="train",
         help="file name without extension to load data for the training. only used when"
-            "`--src_data` is set to `'meds'`."
+        "`--src_data` is set to `'meds'`.",
     )
     parser.add_argument(
         "--valid_subset",
         type=str,
         default="tuning",
         help="file name without extension to load data for the validation. only used when"
-            "`--src_data` is set to `'meds'`."
+        "`--src_data` is set to `'meds'`.",
     )
     parser.add_argument(
         "--test_subset",
         type=str,
         default="held_out",
         help="file name without extension to load data for the test. only used when `--src_data` "
-            "is set to `'meds'`."
+        "is set to `'meds'`.",
     )
+    parser.add_argument(
+        "--unique_events_path",
+        type=str,
+        default=None,
+        help="path to directory containing `unique_events.h5` to encode events in MEDS dataset. "
+        "only used when `--src_data` is set to `'meds'`",
+    )
+
     parser.add_argument(
         "--test_cohort",
         type=str,
         default=None,
         help="path to the test cohort, which must be a result of ACES. it can be either of "
-            "directory or the exact file path that has .parquet file extension. if provided with "
-            "directory, it tries to load `${test_subset}`/*.parquet files in the directory. "
-            "note that the set of patient ids in this cohort should be matched with that in the "
-            "test dataset"
+        "directory or the exact file path that has .parquet file extension. if provided with "
+        "directory, it tries to load `${test_subset}`/*.parquet files in the directory. "
+        "note that the set of patient ids in this cohort should be matched with that in the "
+        "test dataset",
     )
 
     parser.add_argument(
@@ -76,11 +84,12 @@ def get_parser():
             "readmission",
             "los_7",
             "los_14",
-            "mortality_1",
+            "mortality" "mortality_1",
             "mortality_2",
             "mortality_3",
             "mortality_7",
             "mortality_14",
+            "mortality",
             "diagnosis",
             "creatinine_1",
             "creatinine_2",
@@ -100,7 +109,7 @@ def get_parser():
             "sodium_1",
             "sodium_2",
             "sodium_3",
-            "meds_single_task"
+            "meds_single_task",
         ],
         default=[
             "readmission",
@@ -197,7 +206,9 @@ def get_parser():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log_loss", action="store_true")
     # Wandb
-    parser.add_argument("--wandb", action="store_true", help="whether to log using wandb")
+    parser.add_argument(
+        "--wandb", action="store_true", help="whether to log using wandb"
+    )
     parser.add_argument("--wandb_entity_name", type=str)
     parser.add_argument("--wandb_project_name", type=str, default="REMed")
     parser.add_argument("--pretrained", type=str, default=None)

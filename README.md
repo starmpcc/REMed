@@ -153,6 +153,10 @@ accelerate launch \
 </details>
 
 ## Support for MEDS dataset
+
+> [!Caution]
+> This instruction is still under progress, which may not be aligned with the recent updates.
+
 We officially support to process [MEDS](https://github.com/Medical-Event-Data-Standard/meds/releases/tag/0.3.0) dataset (currently, MEDS v0.3) with a cohort defined by [ACES](https://github.com/justin13601/ACES), only for the REMed model.
 It consists of 4 steps in total, each of which can be run by Python or shell scripts that are prepared in [`scripts/meds/`](scripts/meds/) directory.
 For more detailed information, please follow the instructions below.  
@@ -304,6 +308,7 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         --scorer \
         --scorer_use_time \
         --max_seq_len 200000 \
+        --max_retrieve_len 512 \
         # if you want to log using wandb
         --wandb \
         --wandb_entity_name $wandb_entity_name \
@@ -334,6 +339,8 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         --train_type remed \
         --scorer \
         --scorer_use_time \
+        --max_seq_len 200000 \
+        --max_retrieve_len 512 \
         --test_only \
         --test_cohort $ACES_TEST_COHORT_DIR \
         --resume_name $CHECKPOINT_DIR
