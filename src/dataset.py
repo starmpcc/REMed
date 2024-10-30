@@ -72,7 +72,7 @@ class BaseDataset(Dataset):
             else:
                 padded = pad_sequence([i[k] for i in out], batch_first=True)
                 ret[k] = pad(padded, (0, 0, 0, padding_to - padded.shape[1]))
-        
+
         return ret
 
     def get_labels(self, data):
@@ -275,7 +275,8 @@ class MEDSDataset(Dataset):
 
             if self.args.random_sample:
                 indices = random.sample(
-                    range(max(0, length - max_num_events), length), self.args.max_seq_len
+                    range(max(0, length - max_num_events), length),
+                    self.args.max_seq_len,
                 )
                 indices.sort()
                 input = input[indices, :, :]
@@ -313,7 +314,7 @@ class MEDSForReprGen(Dataset):
         for shard_id, data in self.data.items():
             keys = data.keys()
             shard_manifest = {k: shard_id for k in keys}
-            self.manifest |= shard_manifest
+            self.manifest.update(**shard_manifest)
         self.keys = list(self.manifest.keys())
 
     def __len__(self):
@@ -324,18 +325,14 @@ class MEDSForReprGen(Dataset):
         type_ids = torch.stack([s["type_ids"] for s in samples])
         dpe_ids = torch.stack([s["dpe_ids"] for s in samples])
 
-        ret = {
-            "input_ids": input_ids,
-            "type_ids": type_ids,
-            "dpe_ids": dpe_ids
-        }
+        ret = {"input_ids": input_ids, "type_ids": type_ids, "dpe_ids": dpe_ids}
 
         return ret
 
     def __getitem__(self, idx):
         key = self.keys[idx]
         shard_id = self.manifest[key]
-        data = self.data[shard_id][key]["sources"] # (3, 128)
+        data = self.data[shard_id][key]["sources"]  # (3, 128)
 
         return {
             "input_ids": torch.LongTensor(data[0, :]),
@@ -360,7 +357,7 @@ class MEDSReprDataset(Dataset):
         for shard_id, data in self.data.items():
             keys = data.keys()
             shard_manifest = {k: shard_id for k in keys}
-            self.manifest |= shard_manifest
+            self.manifest.update(**shard_manifest)
         self.keys = list(self.manifest.keys())
 
         self.subject_ids = list(self.manifest.keys())
@@ -412,8 +409,8 @@ class MEDSReprDataset(Dataset):
         label = torch.tensor([data["label"][()]]).float()
 
         if len(repr) > self.args.max_seq_len:
-            repr = repr[-self.args.max_seq_len:, :]
-            times = times[-self.args.max_seq_len:]
+            repr = repr[-self.args.max_seq_len :, :]
+            times = times[-self.args.max_seq_len :]
         # inverse times
         times = max(times) - times
 

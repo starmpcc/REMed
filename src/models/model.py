@@ -484,8 +484,8 @@ class DescEmb(nn.Module):
         x += self.dpe_ids_embedding(dpe_ids)
         if "flatten" in self.args.train_type:  # (B, S, E) -> (B, S, E)
             x = self.time_encoder(x, times, **kwargs)
-        else:  
-            if input_ids.ndim == 3: # x: (B, S, W, E) -> (B*S, W, E)
+        else:
+            if input_ids.ndim == 3:  # x: (B, S, W, E) -> (B*S, W, E)
                 B, S, W = input_ids.shape
                 x = x.view(B * S, -1, self.args.pred_dim)
             x = self.pos_encoder(x)
