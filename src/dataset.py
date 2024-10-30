@@ -222,6 +222,7 @@ class MEDSDataset(Dataset):
         self.manifest = pd.read_csv(
             os.path.join(data_path, split + ".tsv"), delimiter="\t"
         ).set_index("subject_id")
+        self.subject_ids = self.manifest.index.tolist()
 
         unique_shard_ids = self.manifest["shard_id"].unique()
         self.data = {}
@@ -249,7 +250,7 @@ class MEDSDataset(Dataset):
                 ret[k]["meds_single_task"] = torch.FloatTensor(
                     torch.stack([s["label"] for s in samples])
                 )
-            elif k in ["subject_id", "index"]: # for MEDSForReprGen
+            elif k == "subject_id":
                 ret[k] = np.array([s[k] for s in samples])
             else:
                 padded = pad_sequence([s[k] for s in samples], batch_first=True)
@@ -266,7 +267,6 @@ class MEDSDataset(Dataset):
         # assume it is a scalar value for a binary classification task
         label = torch.tensor([data["label"][()]]).float()
 
-        #XXX
         max_num_events = 300000
         if self.args.max_seq_len < len(input):
             length = len(input)
@@ -283,13 +283,15 @@ class MEDSDataset(Dataset):
             else:
                 input = input[-self.args.max_seq_len:, :, :]
                 times = times[-self.args.max_seq_len:]
+                times = times - times[0]
 
         return {
             "input_ids": torch.LongTensor(input[:, 0, :]),
             "type_ids": torch.LongTensor(input[:, 1, :]),
             "dpe_ids": torch.LongTensor(input[:, 2, :]),
             "times": torch.IntTensor(times),
-            "label": label
+            "label": label,
+            "subject_id": subject_id,
         }
 
 
@@ -349,7 +351,6 @@ class MEDSReprDataset(Dataset):
         self.args = args
 
         self.data = {}
-        #TODO ..?
         for fname in glob.glob(os.path.join(data_path, split, f"*_encoded.h5")):
             shard_id = int(os.path.splitext(fname)[0].split("_")[-2])
             self.data[shard_id] = h5pickle.File(
@@ -361,6 +362,8 @@ class MEDSReprDataset(Dataset):
             shard_manifest = {k: shard_id for k in keys}
             self.manifest |= shard_manifest
         self.keys = list(self.manifest.keys())
+
+        self.subject_ids = list(self.manifest.keys())
 
     def __len__(self):
         return len(self.manifest)

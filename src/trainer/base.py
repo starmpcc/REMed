@@ -41,11 +41,17 @@ class Trainer:
             if self.test_cohort is not None:
                 # make subject_id to be {subject_id}_{cohort_number} to prevent duplicated ids
                 if os.path.isdir(self.test_cohort):
-                    test_cohort = pl.read_parquet(
-                        os.path.join(self.test_cohort, self.test_subset, "*.parquet")
-                    )
+                    if os.path.basename(self.test_cohort) != self.test_subset:
+                        test_cohort = pl.read_parquet(
+                            os.path.join(self.test_cohort, self.test_subset, "*.parquet")
+                        )
+                    else:
+                        test_cohort = pl.read_parquet(
+                            os.path.join(self.test_cohort, "*.parquet")
+                        )
                 else:
                     test_cohort = pl.read_parquet(self.test_cohort)
+                test_cohort = test_cohort.sort(by=["subject_id", "prediction_time"])
                 test_cohort = test_cohort.with_columns(
                     pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
                 )
@@ -75,9 +81,14 @@ class Trainer:
             self.args.batch_size // self.accelerator.num_processes
         )
         if self.args.src_data == "meds":
-            if self.args.save_dir.endswith("/"):
-                self.args.save_dir = self.args.save_dir[:-1]
-            self.args.exp_name = os.path.basename(self.args.save_dir) + "_" + str(self.args.seed)
+            if self.args.test_only:
+                if self.args.resume_name.endswith("/"):
+                    self.args.resume_name = self.args.resume_name[:-1]
+                self.args.exp_name = os.path.basename(self.args.resume_name)
+            else:
+                if self.args.save_dir.endswith("/"):
+                    self.args.save_dir = self.args.save_dir[:-1]
+                self.args.exp_name = os.path.basename(self.args.save_dir) + "_" + str(self.args.seed)
         elif self.args.resume_name:
             self.args.exp_name = self.args.resume_name
         else:
@@ -103,7 +114,7 @@ class Trainer:
         exp_encoded = broadcast(exp_encoded.to(self.accelerator.device))
         self.args.exp_name = "".join([chr(int(i)) for i in exp_encoded])
 
-        if not self.args.encode_only:
+        if not self.args.encode_only and not self.args.test_only:
             os.makedirs(
                 os.path.join(self.args.save_dir, self.args.exp_name), exist_ok=True
             )
@@ -342,8 +353,34 @@ class Trainer:
                 t = tqdm(data_loader, desc=f"{split} epoch {n_epoch}")
             else:
                 t = data_loader
+
+            do_output_cohort = False
+            if self.args.src_data == "meds" and (
+                split == self.test_subset and self.test_cohort is not None
+            ):
+                if self.accelerator.num_processes == 1:
+                    # check if test cohort is valid
+                    assert set(data_loader.dataset.subject_ids) == set(self.test_cohort["subject_id"]), (
+                        "a set of patient ids in the test cohort should equal to that in the test dataset"
+                    )
+                    predicted_cohort = {"subject_id": [], "boolean_prediction": []}
+                    do_output_cohort = True
+                else:
+                    logger.warning(
+                        "not yet implemented to output predicted labels and probs with "
+                        "--test_cohort in multi-processing environment. please run with "
+                        "--num_processes=1 in accelerate launch."
+                    )
+
             for sample in t:
                 output, reprs = self.model(**sample)
+                # meds -- output
+                if do_output_cohort:
+                    predicted_cohort["subject_id"].extend(sample["subject_id"].tolist())
+                    predicted_cohort["boolean_prediction"].extend(
+                        output["pred"]["meds_single_task"].view(-1).tolist()
+                    )
+
                 loss, logging_outputs = self.criterion(output, reprs)
                 if split == self.train_subset:
                     self.optimizer.zero_grad(set_to_none=True)
@@ -357,6 +394,18 @@ class Trainer:
                     and self.args.log_loss
                 ):
                     self.accelerator.log({f"{split}_loss": loss})
+
+        if do_output_cohort:
+            predicted_cohort = pl.DataFrame(predicted_cohort)
+            self.test_cohort = self.test_cohort.join(predicted_cohort, on="subject_id", how="left")
+            self.test_cohort = self.test_cohort.select(
+                [
+                    pl.col("boolean_prediction"),
+                    pl.col("subject_id"),
+                    pl.col("prediction_time"),
+                    pl.col("boolean_value")
+                ]
+            )
 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)

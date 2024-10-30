@@ -47,6 +47,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--birth_code",
+        type=str,
+        default="MEDS_BIRTH",
+        help="string code for the birth event in the dataset."
+    )
+
+    parser.add_argument(
         "--cohort",
         type=str,
         help="path to the defined cohort, which must be a result of ACES. it can be either of "
@@ -125,14 +132,12 @@ def main(args):
     codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
     codes_metadata = codes_metadata.set_index("code")["description"].to_dict()
     # do not allow to use static events or birth event
-    birth_code = (
-        "MEDS_BIRTH"  # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
-    )
-    if birth_code not in codes_metadata:
-        print(
-            f'"{birth_code}" is not found in the codes metadata, which may lead to '
-            "unexpected results since we currently exclude this event from the input data. "
-        )
+    birth_code = args.birth_code
+    # if birth_code not in codes_metadata:
+    #     print(
+    #         f'"{birth_code}" is not found in the codes metadata, which may lead to '
+    #         "unexpected results since we currently exclude this event from the input data. "
+    #     )
 
     if mimic_dir is not None:
         d_items = pd.read_csv(mimic_dir / "icu" / "d_items.csv.gz")
@@ -531,6 +536,7 @@ def meds_to_remed(
         ["subject_id", "cohort_end", "cohort_label"], maintain_order=True
     ).agg(pl.all())
 
+    df_chunk = df_chunk.sort(by=['subject_id', 'cohort_end'])
     # regard {subject_id} as {cohort_id}: {subject_id}_{cohort_number}
     df_chunk = df_chunk.with_columns(
         pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
