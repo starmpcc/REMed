@@ -171,12 +171,14 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
     ```shell script
     $ python scripts/meds/process_meds.py $MEDS_PATH \
         --cohort $ACES_COHORT_PATH \
+        --metadata_dir $METADATA_DIR \
         --output_dir $PROCESSED_MEDS_DIR \
         --birth_code $BIRTH_CODE \
         --rebase \
         --workers $NUM_WORKERS
     ```
     * `$MEDS_PATH`: path to MEDS dataset to be processed. It can be a directory or the exact file path with the file exenstion (only `.csv` or `.parquet` allowed). If provided with directory, it tries to scan all `*.csv` or `*.parquet` files contained in the directory recursively.
+    * `$METADATA_DIR`: path to the metadata directory for the input MEDS dataset, expected to contain `codes.parquet`. This is used to retrieve descriptions for codes in MEDS events and convert each code to the retrieved description. Note that if a code has no specific description in `codes.parquet`, it will just treat that code as a plain text and process the event as it is.
     * `$ACES_COHORT_PATH`: path to the defined cohort, which must be a result of [ACES](https://github.com/justin13601/ACES). It can be a directory or the exact file path that has the same file extension with the MEDS dataset to be processed. The file structure of this cohort directory should be the same with the provided MEDS dataset directory (`$MEDS_PATH`) to match each cohort to its corresponding shard data.
     * `$PROCESSED_MEDS_DIR`: directory to save processed outputs.
         * Enabling `--rebase` will renew this directory. If you don't want, please disable this argument.
