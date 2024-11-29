@@ -5,7 +5,7 @@ import multiprocessing
 import os
 import re
 import shutil
-import time
+import warnings
 from argparse import ArgumentParser
 from bisect import bisect_left, bisect_right
 from datetime import datetime
@@ -17,6 +17,9 @@ import pandas as pd
 import polars as pl
 from tqdm import tqdm
 from transformers import AutoTokenizer
+
+pool_manager = multiprocessing.Manager()
+warned_codes = pool_manager.list()
 
 
 def find_boundary_between(tuples_list, start, end):
@@ -42,6 +45,13 @@ def get_parser():
     parser.add_argument(
         "--metadata_dir",
         help="path to metadata directory for the input MEDS dataset, which contains codes.parquet",
+    )
+
+    parser.add_argument(
+        "--birth_code",
+        type=str,
+        default="MEDS_BIRTH",
+        help="string code for the birth event in the dataset."
     )
 
     parser.add_argument(
@@ -78,6 +88,13 @@ def get_parser():
         help="number of parallel workers.",
     )
 
+    parser.add_argument(
+        "--mimic_dir",
+        default=None,
+        help="path to directory for MIMIC-IV database containing hosp/ and icu/ as a subdirectory. "
+        "this is used for addressing missing descriptions in the metadata for MIMIC-IV codes.",
+    )
+
     return parser
 
 
@@ -85,6 +102,7 @@ def main(args):
     root_path = Path(args.root)
     output_dir = Path(args.output_dir)
     metadata_dir = Path(args.metadata_dir)
+    mimic_dir = Path(args.mimic_dir) if args.mimic_dir is not None else None
 
     if not output_dir.exists():
         output_dir.mkdir()
@@ -115,6 +133,24 @@ def main(args):
 
     codes_metadata = pl.read_parquet(metadata_dir / "codes.parquet").to_pandas()
     codes_metadata = codes_metadata.set_index("code")["description"].to_dict()
+    # do not allow to use static events or birth event
+    birth_code = args.birth_code
+    # if birth_code not in codes_metadata:
+    #     print(
+    #         f'"{birth_code}" is not found in the codes metadata, which may lead to '
+    #         "unexpected results since we currently exclude this event from the input data. "
+    #     )
+
+    if mimic_dir is not None:
+        d_items = pd.read_csv(mimic_dir / "icu" / "d_items.csv.gz")
+        d_items["itemid"] = d_items["itemid"].astype("str")
+        d_items = d_items.set_index("itemid")["label"].to_dict()
+        d_labitems = pd.read_csv(mimic_dir / "hosp" / "d_labitems.csv.gz")
+        d_labitems["itemid"] = d_labitems["itemid"].astype("str")
+        d_labitems = d_labitems.set_index("itemid")["label"].to_dict()
+    else:
+        d_items = None
+        d_labitems = None
 
     progress_bar = tqdm(data_paths, total=len(data_paths))
     for data_path in progress_bar:
@@ -129,15 +165,6 @@ def main(args):
         else:
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
 
-        # do not allow to use static events or birth event
-        birth_code = (
-            "MEDS_BIRTH"  # NOTE can we assume code for "birth" is always "MEDS_BIRTH"?
-        )
-        if birth_code not in codes_metadata:
-            print(
-                f'"{birth_code}" is not found in the codes metadata, which may lead to '
-                "unexpected results since we currently exclude this event from the input data. "
-            )
         data = data.with_columns(
             pl.when(pl.col("code") == birth_code)
             .then(None)
@@ -156,17 +183,21 @@ def main(args):
             raise ValueError(f"Unsupported file format: {cohort_path.suffix}")
 
         cohort = cohort.drop_nulls(label_col_name)
+        cohort = cohort.unique()
 
         cohort = cohort.select(
-            [pl.col("subject_id"),
+            [
+                pl.col("subject_id"),
                 pl.col(label_col_name),
                 # pl.col("input.end_summary").struct.field("timestamp_at_start").alias("starttime"),
                 pl.col("prediction_time").alias("endtime"),
             ]
         )
-        cohort = cohort.group_by(
-            "subject_id", maintain_order=True
-        ).agg(pl.col(["endtime", label_col_name])).collect() # omitted "starttime"
+        cohort = (
+            cohort.group_by("subject_id", maintain_order=True)
+            .agg(pl.col(["endtime", label_col_name]))
+            .collect()
+        )  # omitted "starttime"
         cohort_dict = {
             x["subject_id"]: {
                 # "starttime": x["starttime"],
@@ -208,12 +239,17 @@ def main(args):
                 return {"cohort_end": None, "cohort_label": None}
 
         data = data.group_by(["subject_id", "time"], maintain_order=True).agg(pl.all())
-        data = data.with_columns(
-            pl.struct(["subject_id", "time"])
-            .map_elements(
-                extract_cohort,
-                return_dtype=pl.Struct(
-                    {"cohort_end": pl.List(pl.Datetime()), "cohort_label": pl.List(pl.Boolean)}
+        data = (
+            data.with_columns(
+                pl.struct(["subject_id", "time"])
+                .map_elements(
+                    extract_cohort,
+                    return_dtype=pl.Struct(
+                        {
+                            "cohort_end": pl.List(pl.Datetime()),
+                            "cohort_label": pl.List(pl.Boolean),
+                        }
+                    ),
                 )
                 .alias("cohort_criteria")
             )
@@ -245,7 +281,12 @@ def main(args):
                 manifest_f.write("subject_id\tnum_events\tshard_id\n")
 
             must_have_columns = [
-                "subject_id", "cohort_end", "cohort_label", "time", "code", "numeric_value"
+                "subject_id",
+                "cohort_end",
+                "cohort_label",
+                "time",
+                "code",
+                "numeric_value",
             ]
             rest_of_columns = [x for x in data.columns if x not in must_have_columns]
             column_name_idcs = {col: i for i, col in enumerate(data.columns)}
@@ -259,6 +300,9 @@ def main(args):
                 output_dir,
                 output_name,
                 args.workers,
+                d_items,
+                d_labitems,
+                warned_codes,
             )
 
             # meds --> remed
@@ -268,11 +312,12 @@ def main(args):
                 del data
             else:
                 subject_ids = data["subject_id"].unique().to_list()
-                chunksize = math.ceil(len(subject_ids) / args.workers)
+                n = args.workers
+                subject_id_chunks = [subject_ids[i::n] for i in range(n)]
                 data_chunks = []
-                for i in range(0, len(subject_ids), chunksize):
+                for subject_id_chunk in subject_id_chunks:
                     data_chunks.append(
-                        data.filter(pl.col("subject_id").is_in(subject_ids[i:i+chunksize]))
+                        data.filter(pl.col("subject_id").is_in(subject_id_chunk))
                     )
                 del data
                 pool = multiprocessing.get_context("spawn").Pool(processes=args.workers)
@@ -280,6 +325,8 @@ def main(args):
                 length_per_subject_gathered = pool.map(
                     meds_to_remed_partial, data_chunks
                 )
+                pool.close()
+                pool.join()
                 del data_chunks
 
             if len(length_per_subject_gathered) != args.workers:
@@ -302,8 +349,13 @@ def meds_to_remed(
     output_dir,
     output_name,
     num_shards,
-    df_chunk
+    d_items,
+    d_labitems,
+    warned_codes,
+    df_chunk,
 ):
+    code_matching_pattern = re.compile(r"\d+")
+
     def meds_to_remed_unit(row):
         events = []
         digit_offsets = []
@@ -313,13 +365,52 @@ def meds_to_remed(
             digit_offset = []
             col_name_offset = []
             for col_name in ["code", "numeric_value"] + rest_of_columns:
+                # do not process something like "icustay_id" or "hadm_id"
+                if "id" in col_name:
+                    continue
+
                 col_event = row[column_name_idcs[col_name]][event_index]
                 if col_event is not None:
                     col_event = str(col_event)
                     if col_name == "code":
-                        if col_event in codes_metadata and codes_metadata[col_event] != "":
+                        if (
+                            col_event in codes_metadata
+                            and codes_metadata[col_event] != ""
+                        ):
                             col_event = codes_metadata[col_event]
-                    elif not "id" in col_name:
+                        else:
+                            do_break = False
+                            items = col_event.split("//")
+                            is_code = [
+                                bool(code_matching_pattern.fullmatch(item))
+                                for item in items
+                            ]
+                            if True in is_code:
+                                if d_items is not None and d_labitems is not None:
+                                    code_idx = is_code.index(True)
+                                    code = items[code_idx]
+
+                                    if code in d_items:
+                                        desc = d_items[code]
+                                    elif code in d_labitems:
+                                        desc = d_labitems[code]
+                                    else:
+                                        do_break = True
+
+                                    if not do_break:
+                                        items[code_idx] = desc
+                                        col_event = "//".join(items)
+                                else:
+                                    do_break = True
+
+                            if do_break and col_event not in warned_codes:
+                                warned_codes.append(col_event)
+                                warnings.warn(
+                                    "The dataset contains some codes that are not specified in "
+                                    "the codes metadata, which may not be intended. Note that we "
+                                    f"process this code as it is for now: {col_event}."
+                                )
+                    else:
                         col_event = re.sub(
                             r"\d*\.\d+",
                             lambda x: str(round(float(x.group(0)), 4)),
@@ -457,22 +548,24 @@ def meds_to_remed(
     )
     events_data = np.concatenate(events_data)
 
-    df_chunk = df_chunk.select(
-        ["subject_id", "cohort_end", "cohort_label", "time"]
-    )
+    df_chunk = df_chunk.select(["subject_id", "cohort_end", "cohort_label", "time"])
     df_chunk = df_chunk.insert_column(4, data_index)
     df_chunk = df_chunk.explode(["cohort_end", "cohort_label"])
     df_chunk = df_chunk.group_by(
         # ["subject_id", "cohort_start", "cohort_end", "cohort_label"], maintain_order=True
-        ["subject_id", "cohort_end", "cohort_label"], maintain_order=True
+        ["subject_id", "cohort_end", "cohort_label"],
+        maintain_order=True,
     ).agg(pl.all())
 
+    df_chunk = df_chunk.sort(by=['subject_id', 'cohort_end'])
     # regard {subject_id} as {cohort_id}: {subject_id}_{cohort_number}
     df_chunk = df_chunk.with_columns(
         pl.col("subject_id").cum_count().over("subject_id").alias("suffix")
     )
     df_chunk = df_chunk.with_columns(
-        (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias("subject_id")
+        (pl.col("subject_id").cast(str) + "_" + pl.col("suffix").cast(str)).alias(
+            "subject_id"
+        )
     )
     # data = data.drop("suffix", "cohort_start", "cohort_end")
     df_chunk = df_chunk.drop("suffix", "cohort_end")

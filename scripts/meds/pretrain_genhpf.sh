@@ -2,15 +2,16 @@
 
 # Function to display help message
 function display_help() {
-    echo "Usage: $0 <PROCESSED_MEDS_DIR> <SAVE_DIR> <GPU_ID>"
+    echo "Usage: $0 <NUM_PROCESSES> <GPU_IDS> <PROCESSED_MEDS_DIR> <SAVE_DIR>"
     echo
     echo "This script pretrains event encoder using a MEDS cohort, which will be used to encode"
     echo "all events present in the MEDS cohort for the REMed model later."
     echo
     echo "Arguments:"
+    echo "  NUM_PROCESSES       Number of parallel processes"
+    echo "  GPU_IDS             GPU index to be used for training the model."
     echo "  PROCESSED_MEDS_DIR  Directory containing processed MEDS data, expected to contain *.h5 and *.tsv files."
     echo "  SAVE_DIR            Output directory to save the checkpoint for the pretrained event encoder."
-    echo "  GPU_ID              GPU index to be used for training the model."
     echo
     echo "Options:"
     echo "  -h, --help          Display this help message and exit."
@@ -23,15 +24,15 @@ if [ "$#" -lt 3 ]; then
     display_help
 fi
 
-
-PROCESSED_MEDS_DIR="$1"
-SAVE_DIR="$2"
-GPU_ID="$3"
+NUM_PROCESSES="$1"
+GPU_IDS="$2"
+PROCESSED_MEDS_DIR="$3"
+SAVE_DIR="$4"
 
 accelerate launch \
-    --config_file config/single.json \
-    --num_processes 1 \
-    --gpu_ids="$GPU_ID" \
+    --config_file config/config.json \
+    --num_processes $NUM_PROCESSES \
+    --gpu_ids="$GPU_IDS" \
     main.py \
     --src_data meds \
     --input_path "$PROCESSED_MEDS_DIR" \
@@ -39,4 +40,10 @@ accelerate launch \
     --pred_targets meds_single_task \
     --train_type short \
     --lr 5e-5 \
-    --random_sample
+    --batch_size 32 \
+    --random_sample \
+    --seed 2020 \
+    --patience 5 \
+    # --wandb \
+    # --wandb_project_name ??? \
+    # --wandb_entity_name ???

@@ -75,9 +75,9 @@ class REMedTrainer(Trainer):
             ):
                 if self.accelerator.num_processes == 1:
                     # check if test cohort is valid
-                    assert set(data_loader.dataset.manifest) == set(self.test_cohort["subject_id"]), (
-                        "a set of patient ids in the test cohort should equal to that in the test dataset"
-                    )
+                    assert set(data_loader.dataset.manifest) == set(
+                        self.test_cohort["subject_id"]
+                    ), "a set of patient ids in the test cohort should equal to that in the test dataset"
                     predicted_cohort = {"subject_id": [], "boolean_prediction": []}
                     do_output_cohort = True
                 else:
@@ -89,22 +89,32 @@ class REMedTrainer(Trainer):
 
             for sample in t:
                 if split == self.train_subset:
-                    self.model.set_mode("scorer")
+                    self.accelerator.unwrap_model(self.model).set_mode("scorer")
                     net_output, logging_output = step(sample)
 
-                self.model.set_mode("predictor")
+                self.accelerator.unwrap_model(self.model).set_mode("predictor")
                 net_output, logging_output = step(sample)
 
                 # meds -- output
                 if do_output_cohort:
                     predicted_cohort["subject_id"].extend(sample["subject_id"].tolist())
                     predicted_cohort["boolean_prediction"].extend(
-                        net_output['pred']['meds_single_task'].view(-1).tolist()
+                        net_output["pred"]["meds_single_task"].view(-1).tolist()
                     )
 
         if do_output_cohort:
             predicted_cohort = pl.DataFrame(predicted_cohort)
-            self.test_cohort = self.test_cohort.join(predicted_cohort, on="subject_id", how="left")
+            self.test_cohort = self.test_cohort.join(
+                predicted_cohort, on="subject_id", how="left"
+            )
+            self.test_cohort = self.test_cohort.select(
+                [
+                    pl.col("boolean_prediction"),
+                    pl.col("subject_id"),
+                    pl.col("prediction_time"),
+                    pl.col("boolean_value"),
+                ]
+            )
 
         metrics = self.metric.get_metrics()
         log_dict = log_from_dict(metrics, split, n_epoch)
