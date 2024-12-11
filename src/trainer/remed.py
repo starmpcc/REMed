@@ -78,7 +78,7 @@ class REMedTrainer(Trainer):
                     assert set(data_loader.dataset.manifest) == set(
                         self.test_cohort["subject_id"]
                     ), "a set of patient ids in the test cohort should equal to that in the test dataset"
-                    predicted_cohort = {"subject_id": [], "boolean_prediction": []}
+                    predicted_cohort = {"subject_id": [], "predicted_boolean_probability": []}
                     do_output_cohort = True
                 else:
                     logger.warning(
@@ -98,21 +98,25 @@ class REMedTrainer(Trainer):
                 # meds -- output
                 if do_output_cohort:
                     predicted_cohort["subject_id"].extend(sample["subject_id"].tolist())
-                    predicted_cohort["boolean_prediction"].extend(
+                    predicted_cohort["predicted_boolean_probability"].extend(
                         net_output["pred"]["meds_single_task"].view(-1).tolist()
                     )
 
         if do_output_cohort:
             predicted_cohort = pl.DataFrame(predicted_cohort)
+            predicted_cohort = predicted_cohort.with_columns(
+                (pl.col("predicted_boolean_probability") > 0.5).alias("predicted_boolean_value")
+            )
             self.test_cohort = self.test_cohort.join(
                 predicted_cohort, on="subject_id", how="left"
             )
             self.test_cohort = self.test_cohort.select(
                 [
-                    pl.col("boolean_prediction"),
                     pl.col("subject_id"),
                     pl.col("prediction_time"),
                     pl.col("boolean_value"),
+                    pl.col("predicted_boolean_value"),
+                    pl.col("predicted_boolean_probability"),
                 ]
             )
 
