@@ -388,7 +388,7 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         --gpu_ids $GPU_ID \
         main.py \
         --src_data meds \
-        --input_path $ENCODED_MEDS_DIR \
+        --input_path $MEDS_DATA_DIR \
         --save_dir $SAVE_DIR \
         --pred_targets meds_single_task \
         --train_type $REMED_OR_SHORT \
@@ -408,7 +408,7 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
         # --max_retrieve_len 512 \
     ```
     * `$REMED_OR_SHORT`: `"remed"` for REMed model, `"short"` for GenHPF model.
-    * `$ENCODED_MEDS_DIR`: directory containing encoded MEDS data, expected to contain `*_encoded.h5` files.
+    * `$MEDS_DATA_DIR`: directory containing MEDS data. Specifically, same with `$PROCESSED_MEDS_DIR` for GenHPF, or `$ENCODED_MEDS_DIR` for REMed.
     * `$SAVE_DIR`: output directory to save the predicted results as `$test_subset.parquet` (e.g., `held_out.parquet`). This result file has the same rows with the test cohort dataframe provided with `$ACES_TEST_COHORT_DIR`, but has two additional columns: `predicted_label` and `predicted_prob`.
     * `$ACES_TEST_COHORT_DIR`: directory containing **test (held_out)** cohorts generated from ACES, expected to contain `*.parquet` files.
     * `$CHECKPOINT_DIR`: directory containing checkpoint for the trained REMed model containing `checkpoint_best.pt`.

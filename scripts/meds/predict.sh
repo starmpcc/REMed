@@ -9,7 +9,7 @@ function display_help() {
     echo
     echo "Arguments:"
     echo "  GPU_ID                  GPU index to be used for training the model."
-    echo "  ENCODED_MEDS_DIR        Directory containing encoded MEDS data, expected to contain *_encoded.h5 files"
+    echo "  MEDS_DATA_DIR           Directory containing MEDS data. Same with `$PROCESSED_MEDS_DIR` for GenHPF, or `$ENCODED_MEDS_DIR` for REMed"
     echo "  SAVE_DIR                Output directory to save the predicted results."
     echo "  REMED_OR_SHORT          String indicator for whether to test REMed model ('remed') or GenHPF model ('short)"
     echo "  ACES_TEST_COHORT_DIR    Directory containing test cohorts generated from ACES, expected to contain *.parquet files."
@@ -27,7 +27,7 @@ if [ "$#" -lt 5 ]; then
 fi
 
 GPU_ID="$1"
-ENCODED_MEDS_DIR="$2"
+MEDS_DATA_DIR="$2"
 SAVE_DIR="$3"
 REMED_OR_SHORT="$4"
 ACES_TEST_COHORT_DIR="$5"
@@ -39,7 +39,7 @@ accelerate launch \
     --gpu_ids $GPU_ID \
     main.py \
     --src_data meds \
-    --input_path $ENCODED_MEDS_DIR \
+    --input_path $MEDS_DATA_DIR \
     --save_dir $SAVE_DIR \
     --pred_targets meds_single_task \
     --train_type $REMED_OR_SHORT \
