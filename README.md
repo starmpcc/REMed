@@ -348,12 +348,18 @@ Additionally, the following scripts assume your dataset is split into `"train"`,
 
 ## Citation
 ```
-@misc{kim2023generalpurpose,
-      title={General-Purpose Retrieval-Enhanced Medical Prediction Model Using Near-Infinite History}, 
-      author={Junu Kim and Chaeeun Shim and Bosco Seong Kyu Yang and Chami Im and Sung Yoon Lim and Han-Gil Jeong and Edward Choi},
-      year={2023},
-      eprint={2310.20204},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
+@InProceedings{pmlr-v252-kim24a,
+  title = 	 {General-Purpose Retrieval-Enhanced Medical Prediction Model Using Near-Infinite History},
+  author =       {Kim, Junu and Shim, Chaeeun and Yang, Bosco Seong Kyu and Im, Chami and Lim, Sung Yoon and Jeong, Han-Gil and Choi, Edward},
+  booktitle = 	 {Proceedings of the 9th Machine Learning for Healthcare Conference},
+  year = 	 {2024},
+  editor = 	 {Deshpande, Kaivalya and Fiterau, Madalina and Joshi, Shalmali and Lipton, Zachary and Ranganath, Rajesh and Urteaga, Iñigo},
+  volume = 	 {252},
+  series = 	 {Proceedings of Machine Learning Research},
+  month = 	 {16--17 Aug},
+  publisher =    {PMLR},
+  pdf = 	 {https://raw.githubusercontent.com/mlresearch/v252/main/assets/kim24a/kim24a.pdf},
+  url = 	 {https://proceedings.mlr.press/v252/kim24a.html},
+  abstract = 	 {Machine learning (ML) has recently shown promising results in medical predictions using electronic health records (EHRs).  However, since ML models typically have a limited capability in terms of input sizes, selecting specific medical events from EHRs for use as input is necessary.  This selection process, often relying on expert opinion, can cause bottlenecks in development.  We propose Retrieval-Enhanced Medical prediction model (REMed) to address such challenges.  REMed can essentially evaluate unlimited medical events, select the relevant ones, and make predictions.  This allows for an unrestricted input size, eliminating the need for manual event selection.  We verified these properties through experiments involving 27 clinical prediction tasks across four independent cohorts, where REMed outperformed the baselines.  Notably, we found that the preferences of REMed align closely with those of medical experts.  We expect our approach to significantly expedite the development of EHR prediction models by minimizing clinicians’ need for manual involvement.}
 }
 ```
